@@ -3,7 +3,7 @@ module MyFunctions
 using LinearAlgebra
 using QuantumToolbox
 
-export get_shifted_eigvals, get_shifted_eigvals_dense, H_Dicke, H_comp_separated, H_Dicke_separated, H_Dicke_polaron, J_separated
+export get_shifted_eigvals, get_shifted_eigvals_dense, H_Dicke, H_comp_separated, H_Dicke_separated, H_Dicke_polaron, J_separated, get_shifted_eigvals_NH, get_shifted_eigvals_dense_NH, H_Dicke_NH, H_comp_NH_separated, H_Dicke_NH_separated, parity_blocks_NH, parity_blocks_NH_coll, gen_liouvillian_qrm, qrm_emission_field, lep_indicators, lep_min_gap
 
 # Wrap in a QuantumObject only if needed, so the eigenvalue helpers accept both raw matrices and QuantumObject blocks.
 _as_qobj(H::QuantumObject) = H
@@ -184,6 +184,208 @@ function H_Dicke_NH_separated(H_0, H_int, g::Real)
     end
 
     return result
+end
+
+"""
+    parity_blocks_NH(g, vars)
+
+Split the effective non-Hermitian Dicke Hamiltonian into its two Z₂-parity sectors.
+Parity Π = (-1)^(a†a + Jz + N/2) commutes with H, so H is block-diagonal in the computational basis (where Π is diagonal). Returns (H_even, H_odd) as dense matrices (the even/odd sectors), which can then be diagonalized independently, useful to tell apart exceptional points (same-parity level coalescence, defective) from diabolic points (different-parity crossings, non-defective).
+"""
+function parity_blocks_NH(g, vars::NamedTuple)
+    Nc, N = vars.Nc, vars.N
+    H = to_dense(H_Dicke_NH(g, vars)).data
+
+    a   = generate_a(N, Nc)
+    nph = real.(diag(to_dense(a' * a).data))
+    exc = real.(diag(to_dense(generate_collective_op(sigmaz()/2, N, Nc)).data)) .+ N/2
+    signs = round.(Int, nph .+ exc)
+
+    even = findall(iseven, signs)
+    odd  = findall(isodd,  signs)
+    return H[even, even], H[odd, odd]
+end
+
+"""
+    parity_blocks_NH_coll(g, vars)
+
+Parity (Z₂) blocks of the effective NH Dicke Hamiltonian in the collective (maximal-spin j = N/2) sector, of dimension Nc·(N+1). 
+Returns (H_even, H_odd) as dense matrices. For N = 1 it coincides with `parity_blocks_NH`.
+"""
+function parity_blocks_NH_coll(g, vars::NamedTuple)
+    Nc, N, ωa, ωb, γa, γb = vars.Nc, vars.N, vars.ωa, vars.ωb, vars.γa, vars.γb
+    ωa_eff = ωa - 1im * γa / 2
+    ωb_eff = ωb - 1im * γb / 2
+
+    j  = N / 2
+    Jz = spin_Jz(j); Jx = spin_Jx(j)
+    d  = size(Jz, 1)                       # = N + 1
+    a   = kron(destroy(Nc), eye(d))
+    Jzf = kron(eye(Nc), Jz)
+    Jxf = kron(eye(Nc), Jx)
+    H   = ωb_eff * Jzf + ωa_eff * a' * a + g * 2 / sqrt(N) * (a + a') * Jxf
+    Hd  = to_dense(H).data
+
+    nph = real.(diag(to_dense(a' * a).data))
+    exc = real.(diag(to_dense(Jzf).data)) .+ N/2
+    signs = round.(Int, nph .+ exc)
+    even = findall(iseven, signs)
+    odd  = findall(isodd,  signs)
+    return Hd[even, even], Hd[odd, odd]
+end
+
+
+# Genralized Liouvillian of the QRM with photon and qubit baths, and LEP indicators.
+
+"""
+    gen_liouvillian_qrm(g, vars, γ; T = 0.0, kwargs...)
+
+Wrapper over `liouvillian_dressed_nonsecular` — generalized (dressed, non-secular) Liouvillian of the QRM, with gauge-consistent system-bath coupling fields.
+
+`H_Dicke` is the dipole-gauge QRM with coupling `g(a+a†)σx`, i.e. the dipole Hamiltonian in the photon frame rotated by `a → -ia`. In this frame the physical vector potential that couples the cavity to its bath is `A ∝ i(a-a†)` (not `a+a†` as in the dipole gauge),
+while the qubit couples via `σx` (gauge-invariant). The matching photodetection (electric-field) operator is `qrm_emission_field`.
+
+`γ` and `T` are each a scalar (shared photon/qubit value) or a 2-element `[γa, γb]` / `[Ta, Tb]` (independent photon/qubit channels); a channel is added only if its rate is `> 0`. Returns `(E, U, L)`: dressed energies (truncated if `N_trunc` is given), the eigenvector map, and the generalized Liouvillian.
+"""
+function gen_liouvillian_qrm(g::Real, vars::NamedTuple, γ::Union{Real, AbstractVector{<:Real}}; T::Union{Real, AbstractVector{<:Real}} = 0.0, kwargs...)
+    Nc, N = vars.Nc, vars.N
+    a   = generate_a(N, Nc)
+    A   = 1im * (a - a')
+    sq  = generate_collective_op(sigmax(), N, Nc)
+    H   = H_Dicke(g, vars)
+
+    γa, γb = γ isa Real ? (γ, γ) : (γ[1], γ[2])
+    Ta, Tb = T isa Real ? (T, T) : (T[1], T[2])
+
+    fields = QuantumObject[]
+    T_list = Float64[]
+    γa > 0 && (push!(fields, sqrt(γa) * A);  push!(T_list, Ta))
+    γb > 0 && (push!(fields, sqrt(γb) * sq); push!(T_list, Tb))
+
+    return liouvillian_dressed_nonsecular(H, fields, T_list; kwargs...)
+end
+
+"""
+    qrm_emission_field(g, vars)
+
+Gauge-consistent photodetection operator (physical electric field) for the QRM in the frame of `H_Dicke`, in the bare (photon ⊗ qubit) basis:
+
+    Ê ∝ (a + a†) + 2η·σx ,     η = g / ωc      (collective σx for N > 1).
+
+This is the dipole-gauge electric field, transformed through the `a → -ia` rotation.
+"""
+function qrm_emission_field(g::Real, vars::NamedTuple)
+    Nc, N = vars.Nc, vars.N
+    a  = generate_a(N, Nc)
+    η  = g / vars.ωa
+    sq = generate_collective_op(sigmax(), N, Nc)
+    return (a + a') + 2η * sq
+end
+
+"""
+    lep_indicators(L; rewin = (-0.1, -0.003), imcut = 0.15)
+
+Locate the coalescing eigenpair of a Liouvillian within a physical eigenvalue window
+and quantify its exceptional-point character. Among the right eigenvectors whose
+eigenvalues fall in the window `real ∈ rewin`, `|imag| < imcut` (chosen to isolate the
+slow, single-excitation "vacuum-Rabi" modes near `Re ≈ -γa/2`), it selects the pair with
+**maximal eigenmatrix overlap** — the EP signature — rather than merely the smallest gap.
+
+`L` may be a `SuperOperator` `QuantumObject` or a plain matrix. Returns a NamedTuple:
+- `gap`     = |λ₁ − λ₂|                         → 0 at an EP;
+- `overlap` = |⟨ρ₁|ρ₂⟩|/(‖ρ₁‖‖ρ₂‖) (HS)        → 1 at an EP;
+- `λ1, λ2`  the coalescing Liouvillian eigenvalues;
+- `ρ1, ρ2`  the two eigenmatrices (reshaped), so their coalescence can be inspected directly.
+"""
+function lep_indicators(L; rewin = (-0.1, -0.003), imcut = 0.15)
+    M = L isa AbstractMatrix ? Matrix(L) : Matrix(L.data)
+    F = eigen(M)
+    vals = F.values
+    V = copy(F.vectors)
+    for j in axes(V, 2)
+        V[:, j] ./= norm(V[:, j])
+    end
+    idx = filter(i -> rewin[1] < real(vals[i]) < rewin[2] && abs(imag(vals[i])) < imcut, eachindex(vals))
+    length(idx) < 2 && return (gap = NaN, overlap = NaN, λ1 = NaN + 0im, λ2 = NaN + 0im, ρ1 = nothing, ρ2 = nothing)
+    best = -1.0; pa = 0; pb = 0
+    for ii in 1:length(idx), jj in ii+1:length(idx)
+        a, b = idx[ii], idx[jj]
+        ov = abs(dot(V[:, a], V[:, b]))
+        ov > best && (best = ov; pa = a; pb = b)
+    end
+    d = isqrt(size(M, 1))
+    return (gap = abs(vals[pa] - vals[pb]), overlap = best,
+            λ1 = vals[pa], λ2 = vals[pb],
+            ρ1 = reshape(V[:, pa], d, d), ρ2 = reshape(V[:, pb], d, d))
+end
+
+"""
+    lep_min_gap(L; exclude_zero=true, tol_zero=1e-9, window=nothing, k=1, overlap=false)
+
+Locate near-degeneracies of a Liouvillian by the **minimum pairwise eigenvalue distance**
+— an eigenvalue-only estimator, reliable in USC where the eigenvectors of the non-normal
+generator are ill-conditioned (unlike the overlap in `lep_indicators`). Meant to be mapped
+over a parameter grid to find the dips, then to classify each dip separately.
+
+`L` may be a `SuperOperator` `QuantumObject` or a plain matrix. Options:
+- `exclude_zero`  drop the trivial steady-state mode (|λ| < `tol_zero`) so it does not
+                  masquerade as a degeneracy paired with a slow decaying mode;
+- `window = (remin, remax, immin, immax)`  keep only eigenvalues inside this rectangle of
+                  the complex plane (e.g. the slow modes near `Re ≈ -κ/2`); `nothing` = all.
+                  Note: a conjugate pair `λ, λ*` merging on the real axis is a *genuine* LEP
+                  (critical-damping type); include `Im = 0` in the window to see it;
+- `k`             number of smallest-gap pairs returned (to catch a second/near EP);
+- `overlap`       also compute the eigenmatrix overlap |⟨ρᵢ|ρⱼ⟩| (EP → 1) of each returned
+                  pair. Off by default: for a *scan* use the gap only (values only, no
+                  eigenvectors); switch it on just at the candidates.
+
+Returns a NamedTuple for the closest pair — `gap = |λᵢ − λⱼ|`, indices `i, j`, `λi, λj`,
+`loc = (λi+λj)/2` (position in the complex plane) — plus `pairs`, the list of the `k`
+closest pairs (each with the same fields, and `overlap, ρi, ρj` when `overlap=true`).
+
+CAUTION: a small `gap` at a *single* point is not an EP — both diabolic points and EPs give
+gap → 0. Map `gap(params)`, find localized dips, then classify each by the **scaling** of
+`gap` along a cut through it (∝ √ ⇒ EP, ∝ linear ⇒ DP); use the overlap only as a cross-check.
+Grid minima are generically *between* nodes, so refine (nested grid / local optimizer)
+before quoting an EP location.
+"""
+function lep_min_gap(L; exclude_zero::Bool = true, tol_zero::Real = 1e-9,
+                     window = nothing, k::Int = 1, overlap::Bool = false)
+    M = L isa AbstractMatrix ? Matrix(L) : Matrix(L.data)
+    if overlap                                   # need eigenvectors only for the overlap
+        F = eigen(M); vals = F.values; V = copy(F.vectors)
+        for j in axes(V, 2)
+            V[:, j] ./= norm(V[:, j])
+        end
+    else                                         # scan path: eigenvalues only (cheaper)
+        vals = eigvals(M); V = nothing
+    end
+    idx = collect(eachindex(vals))
+    exclude_zero && (idx = filter(i -> abs(vals[i]) > tol_zero, idx))
+    if window !== nothing
+        rmn, rmx, imn, imx = window
+        idx = filter(i -> rmn ≤ real(vals[i]) ≤ rmx && imn ≤ imag(vals[i]) ≤ imx, idx)
+    end
+    n = length(idx)
+    n < 2 && return (gap = NaN, i = 0, j = 0, λi = NaN + 0im, λj = NaN + 0im,
+                     loc = NaN + 0im, pairs = NamedTuple[], overlap = NaN)
+    gaps = Tuple{Float64,Int,Int}[]              # every pairwise gap in the filtered set
+    for ii in 1:n-1, jj in ii+1:n
+        a, b = idx[ii], idx[jj]
+        push!(gaps, (abs(vals[a] - vals[b]), a, b))
+    end
+    sort!(gaps; by = first)
+    kk = min(k, length(gaps))
+    d  = isqrt(size(M, 1))
+    pairs = map(1:kk) do t
+        g, a, b = gaps[t]
+        p = (gap = g, i = a, j = b, λi = vals[a], λj = vals[b], loc = (vals[a] + vals[b]) / 2)
+        overlap ? merge(p, (overlap = abs(dot(V[:, a], V[:, b])),
+                            ρi = reshape(V[:, a], d, d), ρj = reshape(V[:, b], d, d))) : p
+    end
+    top = pairs[1]
+    return (gap = top.gap, i = top.i, j = top.j, λi = top.λi, λj = top.λj,
+            loc = top.loc, pairs = pairs, overlap = overlap ? top.overlap : NaN)
 end
 
 

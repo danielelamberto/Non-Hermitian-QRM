@@ -18,7 +18,7 @@ julia --project=. -e 'using Pkg; Pkg.instantiate()'
 julia --project=. -t auto          # the notebooks use Threads.@threads for parameter scans
 ```
 
-The notebooks load the module with `using Revise; includet(...); using .MyFunctions`. `Revise` is **not** in `Project.toml`, so it has to be available from the global environment. The include path differs between notebooks. `non_hermitian_Dicke.ipynb` uses `includet("functions.jl")`, but `non_hermitian_QRM.ipynb` currently uses `includet("Julia/NHQRM/functions.jl")`, which is one author's parent-directory layout. Adjust the path when running from the repo root.
+The notebooks load the module with `using Revise; includet(...); using .MyFunctions`. Run them from the repo root. Some commented-out `save(...)` paths still point to `Julia/NHQRM/`, one collaborator's parent-directory layout.
 
 To check a change to `functions.jl` without a notebook:
 ```bash

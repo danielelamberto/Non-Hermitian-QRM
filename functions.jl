@@ -3,7 +3,7 @@ module MyFunctions
 using LinearAlgebra
 using QuantumToolbox
 
-export get_shifted_eigvals, get_shifted_eigvals_dense, H_Dicke, H_comp_separated, H_Dicke_separated, H_Dicke_polaron, J_separated, get_shifted_eigvals_NH, get_shifted_eigvals_dense_NH, H_Dicke_NH, H_comp_NH_separated, H_Dicke_NH_separated, parity_blocks_NH, parity_blocks_NH_coll, gen_liouvillian_qrm, qrm_emission_field, lep_indicators, lep_min_gap
+export get_shifted_eigvals, get_shifted_eigvals_dense, H_Dicke, H_comp_separated, H_Dicke_separated, H_Dicke_polaron, J_separated, get_shifted_eigvals_NH, get_shifted_eigvals_dense_NH, H_Dicke_NH, H_comp_NH_separated, H_Dicke_NH_separated, parity_blocks_NH, parity_blocks_NH_coll, gen_liouvillian_qrm, qrm_emission_field, lep_indicators, lep_min_gap, qfi_eigenstate, qfi_fidelity
 
 # Wrap in a QuantumObject only if needed, so the eigenvalue helpers accept both raw matrices and QuantumObject blocks.
 _as_qobj(H::QuantumObject) = H
@@ -35,6 +35,7 @@ function get_shifted_eigvals_dense_NH(H, nev)
     e = sort(vals; by=real)
     return e[1:nev] .- real(e[1])
 end
+
 
 generate_op(O, idx::Int, N::Int) = mapreduce(i -> i == idx ? O : eye(2), kron, 1:N)
 generate_a(N::Int, Nc::Int) = kron(destroy(Nc), [eye(2) for i in 1:N]...)
@@ -388,5 +389,44 @@ function lep_min_gap(L; exclude_zero::Bool = true, tol_zero::Real = 1e-9,
             loc = top.loc, pairs = pairs, overlap = overlap ? top.overlap : NaN)
 end
 
+
+#----------------- QFI functions ---------------------
+"""
+    qfi_eigenstate(H, dH; n = 1, tol_deg = 1e-10)
+
+Quantum Fisher information of the `n`-th eigenstate (ordered by energy) of a Hermitian H(λ) with respect to λ, from first-order perturbation theory:
+
+    F_λ = 4 Σ_{m≠n} |⟨m|dH|n⟩|² / (E_m − E_n)²
+
+both H, dH may be matrices or `QuantumObject`s. For λ = g in the Dicke model, `dH` is the `H_int` block from `H_comp_separated`.
+Levels within `tol_deg` of E_n are skipped, which is only correct if `dH` does not couple them: diagonalize within a symmetry block that `dH` preserves (for λ = g, both the j blocks and the parity sectors do, since (a+a†)Jx is parity-even).
+"""
+function qfi_eigenstate(H, dH; n::Int = 1, tol_deg::Real = 1e-10)
+    F = H |> _as_qobj |> to_dense
+    dF = dH |> _as_qobj |> to_dense  
+    (; values, vectors) = F.data |> Hermitian |> eigen
+    M = vectors' * (dF.data * vectors[:, n])   # ⟨m|∂λH|n⟩ for all m
+    return 4 * sum(abs2(M[m]) / (values[m] - values[n])^2 for m in eachindex(values) if abs(values[m] - values[n]) > tol_deg)
+end
+
+"""
+    qfi_fidelity(Hλ, λ; n = 1, δmax = 1e-2, nδ = 8)
+
+Brute-force QFI of the `n`-th eigenstate of a Hermitian H(λ), from the fidelity susceptibility. `Hλ` is a function λ ↦ H(λ) (matrix or `QuantumObject`).
+The infidelity 1 − |⟨ψ_n(λ)|ψ_n(λ+δ)⟩|² is computed for `nδ` log-spaced steps up to `δmax`, on both sides of λ, and least-squares fitted to
+χ_F δ² + c₃ δ³ + c₄ δ⁴; the higher orders absorb the curvature, so `δmax` need not be tiny, but χ_F δmax² must stay ≪ 1.
+Returns `(FQ = 4χ_F, χF, δ, infid)`, with the sampled steps and infidelities for inspecting the fit. Should match `qfi_eigenstate`.
+Unlike `qfi_eigenstate`, this breaks down when E_n is (numerically) degenerate even with a level that ∂λH does not couple: the solver returns an arbitrary mixture of the two, differing between λ and λ+δ.
+For the QRM this happens deep past g_c, where the parity doublet splitting reaches machine precision: pass a parity block (from `parity_blocks_NH` with γa = γb = 0) instead of the full H.
+"""
+function qfi_fidelity(Hλ, λ::Real; n::Int = 1, δmax::Real = 1e-2, nδ::Int = 8)
+    state(x) = eigen(Hermitian(to_dense(_as_qobj(Hλ(x))).data)).vectors[:, n]
+    ψ0 = state(λ)
+    d  = exp10.(range(log10(δmax) - 2, log10(δmax), nδ))
+    δ  = [-reverse(d); d]
+    infid = [1 - abs2(dot(ψ0, state(λ + x))) for x in δ]
+    c = [δ .^ 2 δ .^ 3 δ .^ 4] \ infid
+    return (FQ = 4 * c[1], χF = c[1], δ = δ, infid = infid)
+end
 
 end # module

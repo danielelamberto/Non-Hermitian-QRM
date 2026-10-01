@@ -3,7 +3,10 @@ module MyFunctions
 using LinearAlgebra
 using QuantumToolbox
 
-export get_shifted_eigvals, get_shifted_eigvals_dense, H_Dicke, H_comp_separated, H_Dicke_separated, H_Dicke_polaron, J_separated, get_shifted_eigvals_NH, get_shifted_eigvals_dense_NH, H_Dicke_NH, H_comp_NH_separated, H_Dicke_NH_separated, parity_blocks_NH, parity_blocks_NH_coll, gen_liouvillian_qrm, qrm_emission_field, lep_indicators, lep_min_gap
+export get_shifted_eigvals, get_shifted_eigvals_dense, H_Dicke, H_Dicke_sb, H_comp_separated, H_Dicke_separated, H_Dicke_polaron, J_separated
+export get_shifted_eigvals_NH, get_shifted_eigvals_dense_NH, H_Dicke_NH, H_comp_NH_separated, H_Dicke_NH_separated
+export parity_blocks_NH, parity_blocks_NH_coll
+export gen_liouvillian_qrm, qrm_emission_field, lep_indicators, lep_min_gap, track_pair, encircle_swap, ep_feshbach
 
 # Wrap in a QuantumObject only if needed, so the eigenvalue helpers accept both raw matrices and QuantumObject blocks.
 _as_qobj(H::QuantumObject) = H
@@ -54,6 +57,20 @@ function H_Dicke(g::Float64, vars::NamedTuple)
     Jx = generate_collective_op(sigmax()/2, N, Nc)
     Jz = generate_collective_op(sigmaz()/2, N, Nc)
     return ωb * Jz + ωa * a' * a + g * 2 / sqrt(N) * (a + a') * Jx
+end
+
+"""
+    H_Dicke_sb(g, ε, vars)
+
+Build the Dicke Hamiltonian for N two-level systems with the addition of a symmetry-breaking term in the Hamiltonian. The symmetry-breaking term is proportional to the collective spin operator Jx, and its strength is given by the parameter ε. 
+"""
+function H_Dicke_sb(g::Float64, ε::Float64, vars::NamedTuple)
+    Nc, N, ωa, ωb = vars.Nc, vars.N, vars.ωa, vars.ωb
+
+    a = generate_a(N, Nc)
+    Jx = generate_collective_op(sigmax()/2, N, Nc)
+    Jz = generate_collective_op(sigmaz()/2, N, Nc)
+    return ωb * Jz + ωa * a' * a + g * 2 / sqrt(N) * (a + a') * Jx + ε * Jx
 end
 
 """
@@ -240,19 +257,32 @@ end
 """
     gen_liouvillian_qrm(g, vars, γ; T = 0.0, kwargs...)
 
-Wrapper over `liouvillian_dressed_nonsecular` — generalized (dressed, non-secular) Liouvillian of the QRM, with gauge-consistent system-bath coupling fields.
+Wrapper over `liouvillian_dressed_nonsecular`: generalized (dressed, non-secular) Liouvillian of the QRM, with **gauge-consistent** system–bath coupling fields.
 
-`H_Dicke` is the dipole-gauge QRM with coupling `g(a+a†)σx`, i.e. the dipole Hamiltonian in the photon frame rotated by `a → -ia`. In this frame the physical vector potential that couples the cavity to its bath is `A ∝ i(a-a†)` (not `a+a†` as in the dipole gauge),
-while the qubit couples via `σx` (gauge-invariant). The matching photodetection (electric-field) operator is `qrm_emission_field`.
+`H_Dicke` is the dipole-gauge QRM with coupling `g(a+a†)σx`, i.e. the paper's dipole
+Hamiltonian in the photon frame rotated by `a → -ia`. In that frame the **physical
+vector potential** that couples the cavity to its bath is `A ∝ i(a-a†)` (NOT `a+a†`),
+while the qubit couples via `σx` (gauge-invariant). Using the bare `a+a†` overestimates
+the cavity rates by orders of magnitude in USC/DSC — it misses the light–matter
+decoupling. The matching photodetection (electric-field) operator is `qrm_emission_field`.
 
-`γ` and `T` are each a scalar (shared photon/qubit value) or a 2-element `[γa, γb]` / `[Ta, Tb]` (independent photon/qubit channels); a channel is added only if its rate is `> 0`. Returns `(E, U, L)`: dressed energies (truncated if `N_trunc` is given), the eigenvector map, and the generalized Liouvillian.
+`γ` and `T` are each a scalar (shared photon/qubit value) or a 2-element `[γa, γb]` /
+`[Ta, Tb]` (independent photon/qubit channels); a channel is added only if its rate is
+`> 0`. Returns `(E, U, L)`: dressed energies (truncated if `N_trunc` is given), the
+eigenvector map, and the generalized Liouvillian.
+
+`ε` adds a **parity-breaking** bias `ε·σx` to `H` (a flux offset in a flux-qubit
+realization). `σx` is parity-odd (`Π σx Π† = −σx`, `Π = (−1)^{a†a}σz`), so `ε ≠ 0` breaks
+the Z₂ parity, merges the two weak-symmetry blocks of the Liouvillian, and turns on the
+interblock coupling `∝ ε` that converts the parity-protected diabolic points into genuine
+`EP2`s. At `ε = 0` (default) parity is preserved and light–matter degeneracies are diabolic.
 """
-function gen_liouvillian_qrm(g::Real, vars::NamedTuple, γ::Union{Real, AbstractVector{<:Real}}; T::Union{Real, AbstractVector{<:Real}} = 0.0, kwargs...)
+function gen_liouvillian_qrm(g::Real, vars::NamedTuple, γ::Union{Real, AbstractVector{<:Real}}; T::Union{Real, AbstractVector{<:Real}} = 0.0, ε::Real = 0.0, kwargs...)
     Nc, N = vars.Nc, vars.N
     a   = generate_a(N, Nc)
     A   = 1im * (a - a')
     sq  = generate_collective_op(sigmax(), N, Nc)
-    H   = H_Dicke(g, vars)
+    H   = H_Dicke_sb(g, ε, vars)
 
     γa, γb = γ isa Real ? (γ, γ) : (γ[1], γ[2])
     Ta, Tb = T isa Real ? (T, T) : (T[1], T[2])
@@ -386,6 +416,128 @@ function lep_min_gap(L; exclude_zero::Bool = true, tol_zero::Real = 1e-9,
     top = pairs[1]
     return (gap = top.gap, i = top.i, j = top.j, λi = top.λi, λj = top.λj,
             loc = top.loc, pairs = pairs, overlap = overlap ? top.overlap : NaN)
+end
+
+"""
+    track_pair(Llist, λ1, λ2)
+
+Follow a single eigenpair across a sequence of (super)operators `Llist` **by continuity**,
+starting from the reference eigenvalues `(λ1, λ2)`. Unlike `lep_min_gap` — which re-picks the
+globally closest pair at each point and can jump between different pairs — this locks onto the
+same two modes step by step, so an EP scan yields clean, continuous trajectories.
+
+At each step it diagonalizes, selects the eigenvalues nearest to the previous references
+(falling back to the 2nd-nearest if the two would collide onto one index), and records the
+Hilbert–Schmidt overlap of the corresponding right eigenmatrices. Returns a NamedTuple of
+vectors: `λ1s, λ2s` (the two trajectories in ℂ), `mid = (λ1+λ2)/2` (coalescence location),
+`gaps = |λ1−λ2|` (→ 0 at the EP), `overlaps = |⟨ρ1|ρ2⟩|` (→ 1 at the EP).
+
+Diagnostics: near a genuine EP the gap shows a **√-cusp** in the scan parameter and the
+overlap peaks toward 1; a diabolic point gives a **linear V** gap and no eigenvector alignment.
+Overlap alone is unreliable in USC (ill-conditioned eigenvectors) — read it together with the
+gap shape and the ℂ-plane trajectories.
+"""
+function track_pair(Llist, λ1::Number, λ2::Number)
+    λ1s = ComplexF64[]; λ2s = ComplexF64[]; gaps = Float64[]; ovs = Float64[]
+    r1, r2 = ComplexF64(λ1), ComplexF64(λ2)
+    for L in Llist
+        M = L isa AbstractMatrix ? Matrix(L) : Matrix(L.data)
+        F = eigen(M); vals = F.values; V = F.vectors
+        for k in axes(V, 2)
+            V[:, k] ./= norm(V[:, k])
+        end
+        i1 = argmin(abs.(vals .- r1))
+        p2 = sortperm(abs.(vals .- r2))
+        i2 = p2[1] == i1 ? p2[2] : p2[1]              # avoid both tracks landing on one mode
+        push!(λ1s, vals[i1]); push!(λ2s, vals[i2])
+        push!(gaps, abs(vals[i1] - vals[i2]))
+        push!(ovs, abs(dot(V[:, i1], V[:, i2])))
+        r1, r2 = vals[i1], vals[i2]                   # advance references (continuity)
+    end
+    return (λ1s = λ1s, λ2s = λ2s, mid = (λ1s .+ λ2s) ./ 2, gaps = gaps, overlaps = ovs)
+end
+
+"""
+    encircle_swap(Ls, λ1, λ2)
+
+Monodromy (encirclement) test for an exceptional point. `Ls` is a sequence of operators
+sampled around a **closed loop** in the 2-real-parameter plane (first and last point equal,
+the loop enclosing the candidate). The pair `(λ1, λ2)` is followed by continuity around the
+loop (`track_pair`); after one full turn the two eigenvalues **swap** at a genuine EP (the
+√-branch point needs two loops to return) but **return to themselves** at a diabolic point
+or when no EP is enclosed.
+
+Returns `(tr, swapped, d_swap, d_same)`: the full `track_pair` trajectory, the boolean verdict,
+and the two endpoint distances it is based on (`d_swap < d_same` ⇒ swapped). Plot `tr.λ1s`,
+`tr.λ2s` in ℂ to see the interleaving arcs of a true EP.
+"""
+function encircle_swap(Ls, λ1::Number, λ2::Number)
+    tr = track_pair(Ls, λ1, λ2)
+    d_swap = abs(tr.λ1s[end] - λ2) + abs(tr.λ2s[end] - λ1)
+    d_same = abs(tr.λ1s[end] - λ1) + abs(tr.λ2s[end] - λ2)
+    return (tr = tr, swapped = d_swap < d_same, d_swap = d_swap, d_same = d_same)
+end
+
+"""
+    ep_feshbach(L; window = nothing, tol = 1e-3)
+
+Reliable EP2-vs-DP classifier for a Liouvillian, via the **Feshbach 2×2 reduction** —
+the method that survives the dense, non-normal spectrum where eigenvector overlap and
+closest-pair monodromy mislead. It compresses `L` onto the 2-D invariant subspace of its
+closest eigenpair (in the optional complex-plane `window`) using an **ordered complex
+Schur** decomposition, `M2 = Z₂† L Z₂`, and cross-checks with the kernel dimension.
+
+`L` may be a `SuperOperator` `QuantumObject` or a plain matrix. Returns a NamedTuple:
+- `gap`     = |λᵢ − λⱼ| of the closest pair;
+- `t`       = |M2[1,2]|, the Schur off-diagonal. **The decisive quantity:** as the pair is
+              driven to coalescence (`gap → 0`), `t` stays **finite** at an EP2 (M2 → a
+              Jordan block) but **→ 0** at a DP (M2 → a scalar). Do this "t-pinning" test
+              across a parameter sweep for a gold-standard verdict;
+- `tratio`  = t / gap;
+- `overlap` = eigenvector overlap of the (well-conditioned) 2×2 → 1 at an EP;
+- `λ`       = coalescence location (λᵢ+λⱼ)/2;
+- `svmin, sv2, svratio` = the two smallest singular values of `L − λ·I` and their ratio.
+              `dim ker(L − λ·I) = 1` (svratio ≫ 1) ⇒ **EP2** (defective); `= 2` (svratio ~ 1)
+              ⇒ **DP** (semisimple);
+- `verdict` — from **dim ker** (`svratio = sv2/svmin`), the robust discriminator: `svratio ≫
+              10³` ⇒ `EP2` (one SV → 0, defective); coalesced `gap` with `svratio ~ O(1)` ⇒
+              `DP` (two SVs → 0 together, semisimple); otherwise refine. **`t/gap` is NOT
+              used for the verdict** — it diverges spuriously at a floored gap, or when the
+              only route to `gap → 0` is a rate `κ → 0` (then `t ∝ κ → 0`, M2 → scalar = DP);
+- `M2`      — the 2×2 block, for inspection.
+
+Definitive test: drive `gap → 0` at **fixed physical parameters** (2-knob refinement, not by
+lowering a rate); a true EP2 keeps `t` pinned (finite) with `svratio` blowing up, whereas a DP
+has `t → 0` and `svratio ~ O(1)`. At a single, poorly-localized point the verdict is `ambiguo`.
+"""
+function ep_feshbach(L; window = nothing, tol = 1e-4)
+    M = L isa AbstractMatrix ? Matrix(L) : Matrix(L.data)
+    F = schur(M); vals = copy(F.values); n = length(vals)
+    inw(λ) = window === nothing ? true :
+        (window[1] ≤ real(λ) ≤ window[2] && window[3] ≤ imag(λ) ≤ window[4])
+    cand = findall(inw, vals)
+    length(cand) < 2 && return (gap = NaN, t = NaN, tratio = NaN, overlap = NaN, λ = NaN + 0im,
+                                svmin = NaN, sv2 = NaN, svratio = NaN, verdict = "no pair",
+                                M2 = zeros(ComplexF64, 2, 2))
+    bi = bj = 0; best = Inf
+    for ii in 1:length(cand)-1, jj in ii+1:length(cand)
+        i, j = cand[ii], cand[jj]; d = abs(vals[i] - vals[j]); d < best && (best = d; bi = i; bj = j)
+    end
+    sel = falses(n); sel[bi] = true; sel[bj] = true; ordschur!(F, sel)
+    Z2 = F.Z[:, 1:2]; M2 = Z2' * M * Z2
+    e = eigen(M2)
+    v1 = e.vectors[:, 1] / norm(e.vectors[:, 1]); v2 = e.vectors[:, 2] / norm(e.vectors[:, 2])
+    λc = (vals[bi] + vals[bj]) / 2
+    sv = svdvals(M - λc * I); svmin, sv2 = sv[end], sv[end-1]
+    t = abs(M2[1, 2]); tratio = t / max(best, 1e-300); svratio = sv2 / max(svmin, 1e-300)
+    # Verdict from dim ker (svratio), the ROBUST discriminator: at a genuine EP2 exactly ONE
+    # singular value of (L−λ·I) → 0 (svratio ≫ 1); at a DP two vanish together (svratio ~ 1).
+    # NB: `tratio = t/gap` alone is NOT reliable — it diverges spuriously at a FLOORED gap, or
+    # when the only route to gap→0 is a rate κ→0 with t ∝ κ → 0 (M2 → scalar = DP, not Jordan).
+    # A true EP2 keeps t PINNED (finite) as gap→0 at FIXED physical parameters. So drive the gap
+    # to ~0 at fixed rates first, then trust svratio: ≫10³ ⇒ EP2, O(1) ⇒ DP.
+    verdict = svratio > 1e3 ? "EP2 (dim ker = 1: only 1 SV → 0)" : "ambigous"
+    return (gap = best, t = t, tratio = tratio, overlap = abs(dot(v1, v2)), λ = λc, svmin = svmin, sv2 = sv2, svratio = svratio, verdict = verdict, M2 = M2)
 end
 
 

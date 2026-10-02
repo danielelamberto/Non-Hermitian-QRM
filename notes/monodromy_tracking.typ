@@ -12,7 +12,7 @@
   - Two complex, non-conjugate eigenvalues merging (the finite-frequency EP of the dimer) is codimension 2: these EPs are isolated points of a real two-parameter plane, and a loop in real parameters encircles them.
 
   = Ingredients
-  *Paths.* A closed path in parameter space is given by `position(p, u)`, `velocity(p, u)` $= dif "position"\/dif u$ for $u ∈ [0, 1]$, and the `breakpoints` where the velocity jumps (the corners of a `Polygon`), passed to the ODE solver as `tstops`. For the dimer, the plane is $(δ ω, δ γ)$ with $ω_(a,b) = ω_0 ± δ ω$, $γ_(a,b) = γ_0 ± δ γ$ (`dimer_at`).
+  *Paths.* A closed path in parameter space is given by `position(p, u)`, `velocity(p, u)` $= dif "position"\/dif u$ for $u ∈ [0, 1]$, and the `breakpoints` where the velocity jumps (the corners of a `Polygon`), passed to the ODE solver as `tstops`. For the dimer, the plane is $(δ ω, δ γ)$ with $ω_(a,b) = ω_0 ± δ ω$, $γ_(a,b) = γ_0 ± δ γ$, written as a function δ ↦ model with `setproperties` where the loop is defined.
 
   *Affine Liouvillian.* The Lindblad Liouvillian is linear in the frequencies and the rates, so along the path
   $
@@ -20,7 +20,7 @@
     L'(u) &= δ ω'(u) L_ω + δ γ'(u) L_γ,
   $
   where primes denote derivatives in $u$,
-  with $L_ω = -i[hat(a)^† hat(a) - hat(b)^† hat(b), dot]$ and $L_γ = 2(1 + n_B)(cal(D)[hat(a)] - cal(D)[hat(b)]) + 2 n_B (cal(D)[hat(a)^†] - cal(D)[hat(b)^†])$ (`AffineLiouvillian`, `lindblad_affine`). Nothing is rebuilt along the path; only sparse sums are evaluated.
+  with $L_ω = -i[hat(a)^† hat(a) - hat(b)^† hat(b), dot]$ and $L_γ = 2(1 + n_B)(cal(D)[hat(a)] - cal(D)[hat(b)]) + 2 n_B (cal(D)[hat(a)^†] - cal(D)[hat(b)^†])$ (`AffineLiouvillian`, built from any function δ ↦ L(δ) by $L_k = (L(h e_k) - L_0)\/h$, with a check that the family is affine). Nothing is rebuilt along the path; only sparse sums are evaluated.
 
   *Starting point.* At $u = 0$ the eigenpairs $(λ, r)$ nearest to target values (here $-i ω$ from the roots of `disc`) are obtained by shift-invert (`eigenpairs_near`).
 

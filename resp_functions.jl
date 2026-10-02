@@ -93,6 +93,33 @@ function classical_steady_state(mdl::optomech)
     return [(F/(Δ + k*n + im*γa), 2g*c*n) for n ∈ ns]
 end
 
+# Reference displacement (α, β = x̄/2) of the classical steady state, for a displaced frame a = α + d, b = β + e.
+function classical_displacement(mdl::optomech; branch=1)
+    α, x̄ = classical_steady_state(mdl)[branch]
+    return α, x̄/2
+end
+
+# Linearised fluctuations around a classical steady state, as the equivalent bosonDimer: a at -(Δ + g x̄), coupling
+# -g(α* a + α a†)(b + b†) = (2g|α|/2)(a' + a'†)(b + b†) after absorbing the phase of α. Same bath treatment (approx).
+function linearised_dimer(mdl::optomech; branch=1)
+    (;ωb, γa, γb, g, Δ, nBb, approx) = mdl
+    α, x̄ = classical_steady_state(mdl)[branch]
+    return bosonDimer(ωa=-(Δ + g*x̄), ωb=ωb, γa=γa, γb=γb, g=2g*abs(α), nB=nBb, approx=filter(!=(linearised), approx))
+end
+
+# (Δ, F) of the linearised EP: resonance Δ + g x̄ = -ωb and coupling 2g|α| = g_EP of the dimer (EP of bosonDimer).
+# Only for RWA_env, where the dimer EP needs equal bare frequencies. Returns (Δ, F, number of classical branches there).
+function linearised_EP(mdl::optomech)
+    (;ωb, γa, γb, g) = mdl
+    RWA_env ∈ mdl.approx || throw(ArgumentError("linearised_EP is implemented for RWA_env only"))
+    g_EP, = EP(bosonDimer(ωa=ωb, ωb=ωb, γa=γa, γb=γb, g=1., approx=[RWA_env]))
+    n = (g_EP/2g)^2                                  # |α|² at the EP
+    x̄ = 2g*n*ωb/(ωb^2 + γb^2)
+    Δ = -ωb - g*x̄
+    F = √(n*(ωb^2 + γa^2))
+    return Δ, F, length(classical_steady_state(setproperties(mdl, (Δ=Δ, F=F))))
+end
+
 ## Analytical response
 
 D_R(ω, mdl::boson) = RWA_env ∈ mdl.approx ? ((ω + im*mdl.γ)^2 - mdl.ω0^2)/mdl.ω0 : (ω^2 - mdl.ω0^2 + 2im*ω*mdl.γ)/mdl.ω0
@@ -367,360 +394,6 @@ end
 fig
 
 
-#%% Generic definitions: monodromy (closed paths in parameter space)
-
-# A path p is defined for u ∈ [0, 1], with position(p, 0) == position(p, 1), and provides
-# position(p, u), velocity(p, u) = d position/du, and breakpoints(p): the u where velocity jumps (tstops for ODE solvers).
-
-using SparseArrays
-using OrdinaryDiffEqVerner
-import QuantumToolbox: SVector
-const P2 = SVector{2,Float64}
-
-abstract type ParamPath end
-breakpoints(::ParamPath) = Float64[]
-
-struct Circle <: ParamPath
-    center::P2
-    ρ::Float64
-end
-position(c::Circle, u) = c.center + c.ρ*P2(cospi(2u), sinpi(2u))
-velocity(c::Circle, u) = 2π*c.ρ*P2(-sinpi(2u), cospi(2u))
-
-# Closed polygon through the vertices in order (a rectangle is 4 vertices), uniform in u along each edge.
-struct Polygon <: ParamPath
-    vertices::Vector{P2}
-end
-# number of edges, index of the current edge (0-based) and position t ∈ [0, 1] along it
-function _edge(p::Polygon, u)
-    n = length(p.vertices)
-    k = min(floor(Int, n*u), n - 1)
-    return n, k, n*u - k
-end
-function position(p::Polygon, u)
-    n, k, t = _edge(p, u)
-    return (1 - t)*p.vertices[k + 1] + t*p.vertices[mod1(k + 2, n)]
-end
-function velocity(p::Polygon, u)
-    n, k, _ = _edge(p, u)
-    return n*(p.vertices[mod1(k + 2, n)] - p.vertices[k + 1])
-end
-breakpoints(p::Polygon) = collect(1:length(p.vertices) - 1) ./ length(p.vertices)
-
-# Dimer detuned by ±δω and with damping asymmetry ±δγ around (ω0, γ0); g, nB and approx are taken from mdl.
-dimer_at(mdl::bosonDimer, (δω, δγ); ω0=1., γ0=0.1) =
-    setproperties(mdl, (ωa=ω0 + δω, ωb=ω0 - δω, γa=γ0 + δγ, γb=γ0 - δγ))
-
-# Liouvillian (as a sparse matrix) affine in the path parameters, L(δ) = L0 + Σₖ δₖ Lₖ.
-# Along a path p: L(u) = A(position(p, u)) and dL/du = derivative(A, velocity(p, u)).
-struct AffineLiouvillian{M<:AbstractMatrix}
-    L0::M
-    Ls::Vector{M}
-end
-(A::AffineLiouvillian)(δ) = A.L0 + sum(δ[k]*A.Ls[k] for k ∈ eachindex(A.Ls))
-derivative(A::AffineLiouvillian, v) = sum(v[k]*A.Ls[k] for k ∈ eachindex(A.Ls))
-
-# Lindblad dimer as a function of (δω, δγ), see dimer_at: the Hamiltonian is linear in ωa, ωb and the dissipators in γa, γb.
-# L_ω = -i[a'a - b'b, ⋅],  L_γ = 2(1 + nB)(D[a] - D[b]) + 2nB(D[a'] - D[b']).
-function lindblad_affine(â::QuantumObject, b̂::QuantumObject, mdl::bosonDimer; ω0=1., γ0=0.1)
-    nB = mdl.nB
-    L0 = liouvillian(Lindbladian(â, b̂, dimer_at(mdl, P2(0, 0); ω0, γ0))...).data
-    Lω = liouvillian(â'*â - b̂'*b̂).data
-    Lγ = (2(1 + nB)*(lindblad_dissipator(â) - lindblad_dissipator(b̂)) + 2nB*(lindblad_dissipator(â') - lindblad_dissipator(b̂'))).data
-    return AffineLiouvillian(L0, typeof(L0)[Lω, Lγ])
-end
-
-# Eigenpairs (λ, r) of the sparse matrix L nearest to each target λ (shift-invert): the starting points for tracking.
-# The shift is offset by δσ so that L - σ is not singular when a target is an exact eigenvalue.
-function eigenpairs_near(L::AbstractMatrix, targets; δσ=1e-3)
-    pairs = map(targets) do λt
-        res = eigsolve(L; sigma=λt + δσ, eigvals=1)
-        (res.values[1], res.vectors[:, 1])
-    end
-    allunique(round.(first.(pairs), digits=10)) || @warn "eigenpairs_near: two targets converged to the same eigenvalue"
-    return pairs
-end
-
-## Eigenpair tracking: (L(u) - λ) r = 0 with the normalisation c'r = 1, c fixed.
-# Differentiating in u gives the bordered system  B [dr; dλ] = [-(dL/du) r; 0],  B = [L - λI  -r; c'  0].
-# B is non-singular while λ is simple and c'r ≠ 0, and becomes singular at an EP. It depends on (u, λ, r), but changes
-# little along the path: systems are solved with an LU of an earlier B plus iterative refinement (StaleLU).
-
-# normalisation vector for r: c'r = 1
-normalisation(r) = r/dot(r, r)
-
-function bordered(L::SparseMatrixCSC, λ, r, c)
-    T = promote_type(eltype(L), typeof(λ), eltype(r), eltype(c))
-    return [L - λ*I         sparse(reshape(-r, :, 1))
-            sparse(reshape(conj(c), 1, :))   spzeros(T, 1, 1)]
-end
-
-# B x, without assembling B
-function bordered_mul(L::SparseMatrixCSC, λ, r, c, x)
-    xr, xλ = @view(x[1:end-1]), x[end]
-    return [L*xr - λ*xr - xλ*r; dot(c, xr)]
-end
-
-# Solves B x = b with the LU of an earlier B (stale), refined by x ← x + F \ (b - B x) until ‖b - B x‖ ≤ rtol ‖b‖.
-# Refactorises with the current B when refinement does not converge within maxiter iterations or stops decreasing,
-# and also after a converged solve that needed more than `early` iterations (B has drifted: keep later solves cheap).
-# One refinement costs ~1/50 of a factorisation here (n_fock = 5), and converges by a factor ~0.07 per typical step.
-mutable struct StaleLU
-    F::Any                # factorisation of the reference B, nothing before the first solve
-    rtol::Float64
-    maxiter::Int
-    early::Int
-    factorisations::Int
-    refinements::Int
-end
-StaleLU(; rtol=1e-12, maxiter=20, early=8) = StaleLU(nothing, rtol, maxiter, early, 0, 0)
-
-function refactorise!(S::StaleLU, L, λ, r, c)
-    S.F = lu(bordered(L, λ, r, c))
-    S.factorisations += 1
-end
-
-function solve_bordered!(S::StaleLU, L, λ, r, c, b)
-    if S.F !== nothing
-        x = S.F \ b
-        res_prev = Inf
-        for it ∈ 0:S.maxiter
-            res = b - bordered_mul(L, λ, r, c, x)
-            nres = norm(res)
-            if nres ≤ S.rtol*norm(b)
-                it > S.early && refactorise!(S, L, λ, r, c)
-                return x
-            end
-            nres < res_prev || break
-            res_prev = nres
-            x += S.F \ res
-            S.refinements += 1
-        end
-    end
-    refactorise!(S, L, λ, r, c)
-    return S.F \ b
-end
-# without a StaleLU: fresh factorisation
-solve_bordered!(::Nothing, L, λ, r, c, b) = bordered(L, λ, r, c) \ b
-
-# (dr/du, dλ/du) at the eigenpair (λ, r) of L, given dL = dL/du
-function tangent(L::SparseMatrixCSC, dL::SparseMatrixCSC, λ, r, c; solver=nothing)
-    x = solve_bordered!(solver, L, λ, r, c, [-(dL*r); 0])
-    return x[1:end-1], x[end]
-end
-
-# Newton correction of (λ, r) back onto an eigenpair of L at fixed c: solves (L - λ)r = 0, c'r = 1.
-# The Jacobian of these equations is the bordered matrix B.
-# Returns (λ, r, residual before correction, number of iterations), residual = ‖(L - λ)r‖/‖r‖.
-function correct(L::SparseMatrixCSC, λ, r, c; tol=1e-12, maxiter=5, solver=nothing)
-    res0 = norm(L*r - λ*r)/norm(r)
-    res, it = res0, 0
-    while (res > tol || abs(c'*r - 1) > tol) && it < maxiter
-        x = solve_bordered!(solver, L, λ, r, c, [λ*r - L*r; 1 - c'*r])
-        r = r + x[1:end-1]
-        λ += x[end]
-        res, it = norm(L*r - λ*r)/norm(r), it + 1
-    end
-    return λ, r, res0, it
-end
-
-# Follow the eigenpair (λ0, r0) of A along the closed path p, u ∈ [0, 1], by integrating d[r; λ]/du = tangent(...).
-# The state is y = [r; λ]; λ(u) = sol(u)[end], r(u) = sol(u)[1:end-1]. The path's breakpoints are passed as tstops.
-# With corrector = true, every accepted step is followed by a Newton correction (see correct), and the normalisation
-# vector c is reset to normalisation(r) when cos∠(c, r) = 1/(‖c‖‖r‖) drops below reset_cos (c'r = 1 is kept, r is unchanged).
-# With stale = true, the bordered systems reuse an earlier LU with iterative refinement (StaleLU); false refactorises every time.
-# Returns (sol, diagnostics): number of corrections, Newton iterations, largest residual before a correction, c resets,
-# LU factorisations and refinement iterations.
-# The solver must not use lazy interpolation (Vern7(lazy=false)): lazy stages are computed when sol(u) is called,
-# with the current c, which is wrong for steps taken before a reset.
-function track(A::AffineLiouvillian, p::ParamPath, λ0, r0; alg=Vern7(lazy=false), reltol=1e-10, abstol=1e-12,
-               corrector=true, tol=1e-12, reset_cos=0.1, stale=true, kwargs...)
-    c = normalisation(r0)        # passed as the ODE parameter, so that the callback can reset it in place
-    solver = stale ? StaleLU() : nothing
-    function rhs!(dy, y, c, u)
-        dr, dλ = tangent(A(position(p, u)), derivative(A, velocity(p, u)), y[end], @view(y[1:end-1]), c; solver)
-        dy[1:end-1] .= dr
-        dy[end] = dλ
-        return nothing
-    end
-
-    diagnostics = (corrections=Ref(0), iterations=Ref(0), max_residual=Ref(0.), resets=Ref(0))
-    function correct!(integ)
-        c = integ.p
-        λ, r, res0, it = correct(A(position(p, integ.t)), integ.u[end], integ.u[1:end-1], c; tol, solver)
-        if 1/(norm(c)*norm(r)) < reset_cos
-            c .= normalisation(r)
-            diagnostics.resets[] += 1
-        end
-        integ.u[1:end-1] .= r
-        integ.u[end] = λ
-        diagnostics.corrections[] += 1
-        diagnostics.iterations[] += it
-        diagnostics.max_residual[] = max(diagnostics.max_residual[], res0)
-        u_modified!(integ, true)
-    end
-    callback = corrector ? DiscreteCallback((y, u, integ) -> true, correct!; save_positions=(false, false)) : nothing
-
-    prob = ODEProblem(rhs!, [r0; λ0], (0.0, 1.0), c)
-    sol = solve(prob, alg; reltol, abstol, tstops=breakpoints(p), callback, kwargs...)
-    lu_counts = stale ? (factorisations=solver.factorisations, refinements=solver.refinements) : (factorisations=-1, refinements=0)
-    return sol, merge(map(getindex, diagnostics), lu_counts)
-end
-
-
-#%% Monodromy test 
-
-g = 0.01
-mdl = bosonDimer(g=g, approx=[RWA_env])
-
-# EPs at δω = 0. EP(⋅) returns g_EP ∝ |γa - γb| there, so rescale to find the δγ where g_EP = g.
-# (Valid with RWA_env; without it the EPs move to δω = (γ0/ω0) δγ.)
-δγ_EP = g*0.01/EP(dimer_at(mdl, P2(0, 0.01)))[1]
-
-paths = [
-    ("circle",    Circle(P2(0, 0.01), 0.01)),
-    ("rectangle", Polygon([P2(-0.01, 0), P2(0.01, 0), P2(0.01, 0.02), P2(-0.01, 0.02)])),
-]
-
-# velocity must be the derivative of position (centred finite difference, away from the polygon corners)
-for (name, p) ∈ paths, u ∈ (0.1, 0.4, 0.6, 0.9)
-    h = 1e-6
-    err = maximum(abs.((position(p, u + h) - position(p, u - h))/2h - velocity(p, u)))
-    err < 1e-6 || @warn "velocity of the $name path is not d position/du at u = $u" err
-end
-
-n_samples = 60
-us = range(0, 1, n_samples + 1)[1:end-1]
-colors = resample_cmap(:twilight, n_samples)
-
-fig = Figure(size=(1000, 900))
-for (j, (name, p)) ∈ enumerate(paths)
-    ax_param = Axis(fig[1, j]; xlabel="δω", ylabel="δγ", title=name)
-    ax_cmplx = Axis(fig[2, j]; xlabel="Re ω", ylabel="Im ω")
-    scatter!(ax_param, [0, 0], [δγ_EP, -δγ_EP]; marker=:star4, markersize=20, color=:gray)
-    for (u, color) ∈ zip(us, colors)
-        δ = position(p, u)
-        scatter!(ax_param, δ[1], δ[2]; color)
-        ω = filter(r -> real(r) > 0, roots_sorted(dimer_at(mdl, δ)))
-        scatter!(ax_cmplx, real(ω), imag(ω); color)
-    end
-end
-fig
-
-#%% Lindbladian eigenvalue tracking. 
-
-# Step 1: Liouvillian along the loop, its u-derivative, and the starting eigenpairs.
-# Same model and circle as the monodromy test; n_fock = 5 per mode, so L is 625×625 (sparse).
-n_fock = 5
-â = destroy(n_fock) ⊗ eye(n_fock)
-b̂ = eye(n_fock) ⊗ destroy(n_fock)
-
-g = 0.01
-mdl = bosonDimer(g=g, approx=[RWA_env])
-p = Circle(P2(0, 0.01), 0.01)
-A = lindblad_affine(â, b̂, mdl)
-
-# reference: Liouvillian rebuilt from scratch at a point of the path
-L_direct(u) = liouvillian(Lindbladian(â, b̂, dimer_at(mdl, position(p, u)))...).data
-
-# 1. affine decomposition: L0 + δω Lω + δγ Lγ equals the direct construction
-err_affine = maximum(norm(A(position(p, u)) - L_direct(u)) for u ∈ (0., 0.3, 0.7))
-println("‖A(δ) - L_direct‖ = ", err_affine)
-
-# 2. dL/du = derivative(A, velocity) against a centred finite difference of the direct construction (relative error)
-h = 1e-6
-err_dL = maximum(u -> norm((L_direct(u + h) - L_direct(u - h))/2h - derivative(A, velocity(p, u)))/norm(derivative(A, velocity(p, u))), (0.1, 0.45, 0.8))
-println("dL/du vs finite difference (relative) = ", err_dL)
-
-# 3. starting pair at u = 0: Liouvillian eigenvalues λ = -iω nearest to the positive-frequency roots of disc
-L_start = A(position(p, 0.))
-targets = -im .* filter(r -> real(r) > 0, roots_sorted(dimer_at(mdl, position(p, 0.))))
-start_pairs = eigenpairs_near(L_start, targets)
-for ((λ, r), λt) ∈ zip(start_pairs, targets)
-    println("target ", λt, "  found ", λ, "  |Δλ| = ", abs(λ - λt), "  ‖(L - λ)r‖/‖r‖ = ", norm(L_start*r - λ*r)/norm(r))
-end
-
-
-# Step 3: one tangent step of the bordered system at fixed u, for both modes.
-pos_roots_at(u) = filter(r -> real(r) > 0, roots_sorted(dimer_at(mdl, position(p, u))))
-h = 1e-5
-for u ∈ (0.1, 0.45, 0.8)
-    L, dL = A(position(p, u)), derivative(A, velocity(p, u))
-    println("u = $u")
-    for (λ, r) ∈ eigenpairs_near(L, -im .* pos_roots_at(u))
-        c = normalisation(r)
-        dr, dλ = tangent(L, dL, λ, r, c)
-
-        # 1. first-order perturbation theory, with the left eigenvector l (L'l = conj(λ) l)
-        (_, l), = eigenpairs_near(sparse(L'), [conj(λ)])
-        dλ_pt = (l'*dL*r)/(l'*r)
-
-        # 2. analytic slope from the roots of disc, λ = -iω
-        nearest(rs, x) = rs[argmin(abs.(rs .- x))]
-        dλ_disc = -im*(nearest(pos_roots_at(u + h), im*λ) - nearest(pos_roots_at(u - h), im*λ))/2h
-
-        # 3. dr against eigenvectors at u ± h, scaled to the same normalisation c'r = 1
-        function r_at(v)
-            (_, rv), = eigenpairs_near(A(position(p, v)), [λ + (v - u)*dλ])
-            return rv/(c'*rv)
-        end
-        dr_fd = (r_at(u + h) - r_at(u - h))/2h
-
-        # 4. condition number of B
-        κ = cond(Matrix(bordered(L, λ, r, c)))
-
-        println("  λ = ", round(λ, digits=6), "  dλ = ", round(dλ, digits=6),
-            "  |dλ - dλ_pt| = ", abs(dλ - dλ_pt), "  |dλ - dλ_disc| = ", abs(dλ - dλ_disc),
-            "  ‖dr - dr_fd‖/‖dr‖ = ", norm(dr - dr_fd)/norm(dr), "  cond(B) = ", round(κ, sigdigits=3))
-    end
-end
-
-# cond(B) grows as the point approaches the EP at (0, δγ_EP) = (0, g/2)
-for d ∈ (1e-2, 1e-3, 1e-4, 1e-5)
-    L = A(P2(0, g/2 + d))
-    λ, r = eigenpairs_near(L, [-im*filter(r -> real(r) > 0, roots_sorted(dimer_at(mdl, P2(0, g/2 + d))))[1]])[1]
-    println("distance $d to the EP:  cond(B) = ", round(cond(Matrix(bordered(L, λ, r, normalisation(r)))), sigdigits=3))
-end
-
-
-# Step 4: track both modes around closed loops, with the Newton corrector, refactorising B every time or reusing a stale LU.
-# Expected: swap for a loop around one EP, none around zero or two EPs. Along the way λ(u) must stay on -iω from disc.
-loops = [
-    ("circle, 1 EP",          Circle(P2(0, 0.01), 0.01)),
-    ("rectangle, 1 EP",       Polygon([P2(-0.01, 0), P2(0.01, 0), P2(0.01, 0.02), P2(-0.01, 0.02)])),
-    ("circle, no EP",         Circle(P2(0, 0.03), 0.01)),
-    ("circle, both EPs",      Circle(P2(0, 0), 0.01)),
-    ("small circle, 1 EP at 1e-4", Circle(P2(0, g/2 + 1e-4), 2e-4)),
-]
-us_check = range(0, 1, 401)
-
-fig = Figure(size=(1000, 1300))
-for (j, (name, q)) ∈ enumerate(loops)
-    disc_λ(u) = -im .* filter(r -> real(r) > 0, roots_sorted(dimer_at(mdl, position(q, u))))
-    pairs0 = eigenpairs_near(A(position(q, 0.)), disc_λ(0.))
-    ax = Axis(fig[fldmod1(j, 2)...]; xlabel="Re ω", ylabel="Im ω", title=name)
-    println(name)
-    for (k, (λ0, r0)) ∈ enumerate(pairs0), stale ∈ (false, true)
-        t = @elapsed sol, diag = track(A, q, λ0, r0; stale)
-        λ1, r1 = sol.u[end][end], sol.u[end][1:end-1]
-        lands_on = argmin(abs.(first.(pairs0) .- λ1))
-        dev = maximum(minimum(abs.(sol(u)[end] .- disc_λ(u))) for u ∈ us_check)
-        res = norm(A(position(q, 1.))*r1 - λ1*r1)/norm(r1)
-        println("  mode $k → $lands_on", stale ? "  stale LU   " : "  fresh LU   ",
-            "max |λ - λ_disc| = ", round(dev, sigdigits=2), ",  final residual ", round(res, sigdigits=2),
-            ",  ", sol.stats.naccept, " steps, ", sol.stats.nf, " rhs, ", round(t, digits=2), " s",
-            ",  $(diag.iterations) Newton its, $(diag.resets) c resets",
-            stale ? ",  $(diag.factorisations) LU, $(diag.refinements) refinements" : "")
-        stale || continue
-        ω = [im*sol(u)[end] for u ∈ us_check]
-        lines!(ax, real(ω), imag(ω); color=Cycled(k), label="mode $k")
-        scatter!(ax, [real(im*λ0)], [imag(im*λ0)]; color=Cycled(k), marker=:star5, markersize=14)
-    end
-    j == 1 && axislegend(ax; position=:lt)
-end
-fig
-
-
 #%% Duffing oscillator: minimal Liouvillian gap in (g, γ), RWA_env, ω0 = 1, nB = 0
 
 # Odd parity sector (where ⟨a⟩ lives), K = 6 slowest eigenvalues. n_fock = 15 is converged to 5 digits for g ≤ 1.
@@ -784,4 +457,512 @@ for (mask, marker, color) ∈ ((unconverged, :xcross, :white), (unstable, :circl
     isempty(bad) || scatter!(ax, [gs[I[1]] for I ∈ bad], [γs[I[2]] for I ∈ bad]; marker, color, markersize=6)
 end
 scatter!(ax, [0.], [1.]; marker=:star5, color=:white, markersize=14)     # g = 0: critical damping γ = ω0
+fig
+
+
+#%% Generic definitions: monodromy tracking of Liouvillian eigenvalues
+
+# Following a pair of Liouvillian eigenvalues continuously around a closed loop in parameter space: if they swap, the
+# loop encloses an (odd number of) EP(s) of the pair. Method and validation: notes/monodromy_tracking.typ.
+#   1. paths in parameter space                       ParamPath, Circle, Polygon, Segment
+#   2. Liouvillians affine in the path parameters     AffineLiouvillian, derivative
+#   3. starting eigenpairs (shift-invert)             eigenpairs_near, pair_near
+#   4. bordered system and its linear solves          normalisation, bordered, bordered_mul, StaleLU, solve_bordered!
+#   5. predictor–corrector tracking along a path      tangent, correct, track
+#   6. locating an EP by bisection with edge reuse    TrackedLine, track_line, transport, rect_swaps, ep_bisect
+# The parametrisation of a path (which model fields its coordinates δ move) and the choice of operators (e.g. a displaced
+# frame) are written where they are used, in the function δ ↦ L(δ) given to AffineLiouvillian.
+
+using SparseArrays
+using OrdinaryDiffEqVerner
+import QuantumToolbox: SVector
+const P2 = SVector{2,Float64}
+
+## 1. Paths in parameter space
+# A path p is parametrised by u ∈ [0, 1] and provides position(p, u), velocity(p, u) = d position/du, and breakpoints(p),
+# the u where the velocity jumps (passed as tstops to the ODE solver). Loops have position(p, 0) == position(p, 1).
+
+abstract type ParamPath end
+breakpoints(::ParamPath) = Float64[]
+
+struct Circle <: ParamPath
+    center::P2
+    ρ::Float64
+end
+position(c::Circle, u) = c.center + c.ρ*P2(cospi(2u), sinpi(2u))
+velocity(c::Circle, u) = 2π*c.ρ*P2(-sinpi(2u), cospi(2u))
+
+# Closed polygon through the vertices in order (a rectangle is 4 vertices), uniform in u along each edge.
+struct Polygon <: ParamPath
+    vertices::Vector{P2}
+end
+# number of edges, index of the current edge (0-based) and position t ∈ [0, 1] along it
+function _edge(p::Polygon, u)
+    n = length(p.vertices)
+    k = min(floor(Int, n*u), n - 1)
+    return n, k, n*u - k
+end
+function position(p::Polygon, u)
+    n, k, t = _edge(p, u)
+    return (1 - t)*p.vertices[k + 1] + t*p.vertices[mod1(k + 2, n)]
+end
+function velocity(p::Polygon, u)
+    n, k, _ = _edge(p, u)
+    return n*(p.vertices[mod1(k + 2, n)] - p.vertices[k + 1])
+end
+breakpoints(p::Polygon) = collect(1:length(p.vertices) - 1) ./ length(p.vertices)
+
+# Open straight path from a to b (not a loop): tracking along single edges, see section 6.
+struct Segment <: ParamPath
+    a::P2
+    b::P2
+end
+position(p::Segment, u) = p.a + u*(p.b - p.a)
+velocity(p::Segment, u) = p.b - p.a
+
+## 2. Liouvillians affine in the path parameters
+# L(δ) = L0 + Σₖ δₖ Lₖ (sparse matrices). Along a path p: L(u) = A(position(p, u)), dL/du = derivative(A, velocity(p, u)),
+# so nothing is rebuilt along the path. The tracker (sections 5 and 6) only uses these two operations: any other type
+# providing them (e.g. a non-affine family with finite-difference derivatives) can replace AffineLiouvillian.
+
+struct AffineLiouvillian{M<:AbstractMatrix}
+    L0::M
+    Ls::Vector{M}
+end
+(A::AffineLiouvillian)(δ) = A.L0 + sum(δ[k]*A.Ls[k] for k ∈ eachindex(A.Ls))
+derivative(A::AffineLiouvillian, v) = sum(v[k]*A.Ls[k] for k ∈ eachindex(A.Ls))
+
+# From any function δ ↦ L(δ) of n coordinates that is affine: L0 = L(0), Lₖ = (L(h eₖ) - L0)/h, exact for an affine
+# family up to round-off. The small step h keeps the model physical (e.g. positive rates) at the evaluation points.
+# check = true evaluates L at δ = h(1, …, 1) and compares the deviation from the decomposition with the change of L over
+# that step: the ratio is round-off for an affine family (~1e-14 here), and grows with h and the curvature otherwise
+# (Redfield dimer: 7e-8); above rtol an error is raised.
+function AffineLiouvillian(L_at::Function, n::Integer; h=1e-3, check=true, rtol=1e-10)
+    L0 = L_at(zeros(n))
+    e(k) = [j == k ? h : 0.0 for j ∈ 1:n]
+    A = AffineLiouvillian(L0, typeof(L0)[(L_at(e(k)) - L0)/h for k ∈ 1:n])
+    if check
+        δ = fill(h, n)
+        L1 = L_at(δ)
+        ratio = norm(L1 - A(δ))/norm(L1 - L0)
+        ratio ≤ rtol || throw(ArgumentError("L_at is not affine in its $n coordinates (relative deviation $ratio)"))
+    end
+    return A
+end
+
+## 3. Starting eigenpairs
+# Eigenpairs (λ, r) of the sparse L nearest to each target λ, one shift-invert each. The shift is offset by δσ so that
+# L - σ is not singular when a target is an exact eigenvalue.
+function eigenpairs_near(L::AbstractMatrix, targets; δσ=1e-3)
+    pairs = map(targets) do λt
+        res = eigsolve(L; sigma=λt + δσ, eigvals=1)
+        (res.values[1], res.vectors[:, 1])
+    end
+    allunique(round.(first.(pairs), digits=10)) || @warn "eigenpairs_near: two targets converged to the same eigenvalue"
+    return pairs
+end
+
+# The two eigenpairs of L nearest σ ≈ the midpoint of a close pair, from a single shift-invert. Near an EP the pair is
+# close, and separate searches from approximate targets can converge to the same eigenvalue.
+function pair_near(L::AbstractMatrix, σ; δσ=1e-6)
+    res = eigsolve(L; sigma=σ + δσ, eigvals=2)
+    return [(res.values[i], res.vectors[:, i]) for i ∈ 1:2]
+end
+
+## 4. Bordered system and its linear solves
+# An eigenpair is fixed by (L - λ) r = 0 and the normalisation c'r = 1, with c fixed. Its Jacobian in (r, λ) is
+#     B = [L - λI  -r; c'  0],
+# non-singular while λ is simple and c'r ≠ 0, singular at an EP (cond(B) ∝ distance^(-1/2) near an EP2).
+
+# normalisation vector for r: c'r = 1
+normalisation(r) = r/dot(r, r)
+
+function bordered(L::SparseMatrixCSC, λ, r, c)
+    T = promote_type(eltype(L), typeof(λ), eltype(r), eltype(c))
+    return [L - λ*I         sparse(reshape(-r, :, 1))
+            sparse(reshape(conj(c), 1, :))   spzeros(T, 1, 1)]
+end
+
+# B x, without assembling B
+function bordered_mul(L::SparseMatrixCSC, λ, r, c, x)
+    xr, xλ = @view(x[1:end-1]), x[end]
+    return [L*xr - λ*xr - xλ*r; dot(c, xr)]
+end
+
+# B depends on (u, λ, r) but changes little along a path: solve B x = b with the LU of an earlier B ("stale"), refined by
+# x ← x + F \ (b - B x) until ‖b - B x‖ ≤ rtol ‖b‖. Refactorise with the current B when refinement does not converge
+# within maxiter iterations or stops decreasing, and after any solve that needed more than `early` iterations (B has
+# drifted: keep the next solves cheap). Counts factorisations and refinement iterations.
+mutable struct StaleLU
+    F::Any                # factorisation of the reference B, nothing before the first solve
+    rtol::Float64
+    maxiter::Int
+    early::Int
+    factorisations::Int
+    refinements::Int
+end
+StaleLU(; rtol=1e-12, maxiter=20, early=8) = StaleLU(nothing, rtol, maxiter, early, 0, 0)
+
+function refactorise!(S::StaleLU, L, λ, r, c)
+    S.F = lu(bordered(L, λ, r, c))
+    S.factorisations += 1
+    return S
+end
+
+function solve_bordered!(S::StaleLU, L, λ, r, c, b)
+    if S.F !== nothing
+        x = S.F \ b
+        res_prev = Inf
+        for it ∈ 0:S.maxiter
+            res = b - bordered_mul(L, λ, r, c, x)
+            nres = norm(res)
+            if nres ≤ S.rtol*norm(b)
+                it > S.early && refactorise!(S, L, λ, r, c)
+                return x
+            end
+            nres < res_prev || break
+            res_prev = nres
+            x += S.F \ res
+            S.refinements += 1
+        end
+    end
+    refactorise!(S, L, λ, r, c)
+    return S.F \ b
+end
+# without a StaleLU: fresh factorisation
+solve_bordered!(::Nothing, L, λ, r, c, b) = bordered(L, λ, r, c) \ b
+
+## 5. Predictor–corrector tracking along a path
+
+# Predictor: (dr/du, dλ/du) at the eigenpair (λ, r) of L, from B [dr; dλ] = [-(dL/du) r; 0].
+function tangent(L::SparseMatrixCSC, dL::SparseMatrixCSC, λ, r, c; solver=nothing)
+    x = solve_bordered!(solver, L, λ, r, c, [-(dL*r); 0])
+    return x[1:end-1], x[end]
+end
+
+# Corrector: Newton iterations at fixed u back onto an eigenpair of L, B [δr; δλ] = [-(L - λ) r; 1 - c'r].
+# Returns (λ, r, residual ‖(L - λ)r‖/‖r‖ before correction, number of iterations).
+function correct(L::SparseMatrixCSC, λ, r, c; tol=1e-12, maxiter=5, solver=nothing)
+    res0 = norm(L*r - λ*r)/norm(r)
+    res, it = res0, 0
+    while (res > tol || abs(c'*r - 1) > tol) && it < maxiter
+        x = solve_bordered!(solver, L, λ, r, c, [λ*r - L*r; 1 - c'*r])
+        r = r + x[1:end-1]
+        λ += x[end]
+        res, it = norm(L*r - λ*r)/norm(r), it + 1
+    end
+    return λ, r, res0, it
+end
+
+# Follows the eigenpair (λ0, r0) of A (see section 2) along the path p by integrating d[r; λ]/du = tangent(...) over tspan (default the
+# whole path), with the path's breakpoints as tstops. Returns (sol, diagnostics): λ(u) = sol(u)[end], r(u) = sol(u)[1:end-1].
+#   corrector = true   Newton correction (correct) after every accepted step, and reset of c to normalisation(r) when
+#                      cos∠(c, r) = 1/(‖c‖‖r‖) < reset_cos (c'r = 1 is kept, r unchanged; ‖r‖ would grow otherwise)
+#   stale = true       bordered systems solved with StaleLU (false: fresh factorisation at every solve)
+# c is the ODE parameter, reset in place by the callback: the solver must not interpolate lazily (Vern7(lazy=false)),
+# lazy stages would be computed when sol(u) is called, with the latest c.
+# diagnostics: corrections, Newton iterations, largest residual before a correction, c resets, factorisations, refinements.
+function track(A, p::ParamPath, λ0, r0; alg=Vern7(lazy=false), reltol=1e-10, abstol=1e-12,
+               corrector=true, tol=1e-12, reset_cos=0.1, stale=true, tspan=(0.0, 1.0), kwargs...)
+    c = normalisation(r0)
+    solver = stale ? StaleLU() : nothing
+    function rhs!(dy, y, c, u)
+        dr, dλ = tangent(A(position(p, u)), derivative(A, velocity(p, u)), y[end], @view(y[1:end-1]), c; solver)
+        dy[1:end-1] .= dr
+        dy[end] = dλ
+        return nothing
+    end
+
+    diagnostics = (corrections=Ref(0), iterations=Ref(0), max_residual=Ref(0.), resets=Ref(0))
+    function correct!(integ)
+        c = integ.p
+        λ, r, res0, it = correct(A(position(p, integ.t)), integ.u[end], integ.u[1:end-1], c; tol, solver)
+        if 1/(norm(c)*norm(r)) < reset_cos
+            c .= normalisation(r)
+            diagnostics.resets[] += 1
+        end
+        integ.u[1:end-1] .= r
+        integ.u[end] = λ
+        diagnostics.corrections[] += 1
+        diagnostics.iterations[] += it
+        diagnostics.max_residual[] = max(diagnostics.max_residual[], res0)
+        u_modified!(integ, true)
+    end
+    callback = corrector ? DiscreteCallback((y, u, integ) -> true, correct!; save_positions=(false, false)) : nothing
+
+    prob = ODEProblem(rhs!, [r0; λ0], tspan, c)
+    sol = solve(prob, alg; reltol, abstol, tstops=filter(u -> tspan[1] < u < tspan[2], breakpoints(p)), callback, kwargs...)
+    lu_counts = stale ? (factorisations=solver.factorisations, refinements=solver.refinements) : (factorisations=-1, refinements=0)
+    return sol, merge(map(getindex, diagnostics), lu_counts)
+end
+
+## 6. Locating an EP by bisection of rectangles, with edge reuse
+# Both eigenvalues of the pair are tracked along straight lines (TrackedLine: one ODE solution per branch). Every side of
+# every rectangle lies on a tracked line; following an eigenvalue along a side means finding the branch that matches it
+# at the start and reading that branch at the end. A rectangle swaps the pair iff it encloses an odd number of their EPs.
+# Splitting a rectangle only requires tracking the new dividing line: the other sides are parts of earlier lines.
+
+struct TrackedLine
+    a::P2
+    b::P2
+    sols::Vector{Any}          # one ODE solution per branch, u ∈ [0, 1] from a to b
+end
+branch(l::TrackedLine, j, s) = l.sols[j](s)[end]
+
+# parameter s of the point x along l, or nothing if x is not on l
+function line_param(l::TrackedLine, x; tol=1e-9)
+    d = l.b - l.a
+    s = dot(x - l.a, d)/dot(d, d)
+    on = abs(d[1]*(x - l.a)[2] - d[2]*(x - l.a)[1]) ≤ tol*dot(d, d) && -tol ≤ s ≤ 1 + tol
+    return on ? clamp(s, 0., 1.) : nothing
+end
+
+# the tracked line containing both x and y, with their parameters along it
+function find_line(lines, x, y)
+    for l ∈ lines
+        sx, sy = line_param(l, x), line_param(l, y)
+        sx !== nothing && sy !== nothing && return l, sx, sy
+    end
+    error("no tracked line contains both $x and $y")
+end
+
+# Tracks both eigenvalues of the pair from a to b, starting from shift-invert near the targets at a.
+function track_line(A, a::P2, b::P2, targets; kwargs...)
+    pairs = eigenpairs_near(A(a), targets)
+    sols = Any[]
+    for (λ0, r0) ∈ pairs
+        sol, _ = track(A, Segment(a, b), λ0, r0; kwargs...)
+        string(sol.retcode) == "Success" || error("tracking along $a → $b failed ($(sol.retcode))")
+        push!(sols, sol)
+    end
+    return TrackedLine(a, b, sols)
+end
+
+# midpoint of the pair at x (on a tracked line, towards y): the shift for pair_near close to the EP
+pair_midpoint(lines, x, y) = (l = find_line(lines, x, y); (branch(l[1], 1, l[2]) + branch(l[1], 2, l[2]))/2)
+
+# Follows the eigenvalue λ from x to y along the tracked line containing both. The branch must be unambiguous: its
+# distance to λ at x below `ratio` times the gap between the two branches there.
+function transport(lines, λ, x, y; ratio=0.25)
+    l, sx, sy = find_line(lines, x, y)
+    v = [branch(l, j, sx) for j ∈ eachindex(l.sols)]
+    d = abs.(v .- λ)
+    j = argmin(d)
+    d[j] ≤ ratio*abs(v[1] - v[2]) || error("ambiguous branch at $x (the EP may lie on this line)")
+    return branch(l, j, sy)
+end
+
+# Does the rectangle (x0, x1, y0, y1) swap the pair? Follows one eigenvalue counterclockwise from (x0, y0).
+function rect_swaps(lines, (x0, x1, y0, y1))
+    c = (P2(x0, y0), P2(x1, y0), P2(x1, y1), P2(x0, y1))
+    l, s, _ = find_line(lines, c[1], c[2])
+    λa, λb = branch(l, 1, s), branch(l, 2, s)
+    λ = λa
+    for k ∈ 1:4
+        λ = transport(lines, λ, c[k], c[mod1(k + 1, 4)])
+    end
+    return abs(λ - λb) < abs(λ - λa)
+end
+
+# Bisection from a rectangle (x0, x1, y0, y1) that swaps the pair: split across the longer side, track the dividing line,
+# keep the half that swaps (exactly one must). A dividing line that fails (EP too close to it) is moved by `shift` of the
+# side, up to three times. corner_targets(x) gives the starting targets at the outer corners.
+# Returns (final rectangle, rectangles at every level, all tracked lines).
+function ep_bisect(A, rect, corner_targets; depth=12, shift=0.1, kwargs...)
+    x0, x1, y0, y1 = rect
+    c = (P2(x0, y0), P2(x1, y0), P2(x1, y1), P2(x0, y1))
+    lines = TrackedLine[track_line(A, c[1], c[2], corner_targets(c[1]); kwargs...),
+                        track_line(A, c[2], c[3], corner_targets(c[2]); kwargs...),
+                        track_line(A, c[4], c[3], corner_targets(c[4]); kwargs...),
+                        track_line(A, c[1], c[4], corner_targets(c[1]); kwargs...)]
+    rect_swaps(lines, rect) || error("the initial rectangle does not swap the pair: no (or an even number of) EP inside")
+    history = [rect]
+    for level ∈ 1:depth
+        x0, x1, y0, y1 = rect
+        vertical = (x1 - x0) ≥ (y1 - y0)                 # split across the longer side
+        for attempt ∈ 0:3
+            f = 0.5 + shift*attempt*(isodd(attempt) ? 1 : -1)/2
+            m = vertical ? x0 + f*(x1 - x0) : y0 + f*(y1 - y0)
+            a, b = vertical ? (P2(m, y0), P2(m, y1)) : (P2(x0, m), P2(x1, m))
+            halves = vertical ? ((x0, m, y0, y1), (m, x1, y0, y1)) : ((x0, x1, y0, m), (x0, x1, m, y1))
+            try
+                # starting targets at a: the two branches of the side it lies on
+                l, s, _ = find_line(lines, a, vertical ? P2(x1, y0) : P2(x0, y1))
+                new = track_line(A, a, b, [branch(l, j, s) for j ∈ 1:2]; kwargs...)
+                sw = [rect_swaps([lines; new], h) for h ∈ halves]
+                count(sw) == 1 || error("$(count(sw)) halves swap")
+                push!(lines, new)
+                rect = halves[findfirst(sw)]
+                break
+            catch err
+                attempt == 3 && rethrow()
+                @warn "level $level: dividing line at f = $f failed ($(sprint(showerror, err))), shifting it"
+            end
+        end
+        push!(history, rect)
+    end
+    return rect, history, lines
+end
+
+
+#%% Monodromy, coupled bosons: tracking the Liouvillian modes around the EP (Lindblad, RWA_env)
+
+# Lindblad dimer in the plane δ = (δω, δγ): detuning ±δω and damping asymmetry ±δγ around ω0 = 1, γ0 = 0.1, g = 0.01.
+# EPs at δω = 0, δγ = ±g/2. Both modes are tracked around five loops and compared with -iω from the roots of disc
+# (same parametrisation). Expected: a swap for a loop around one EP, none around zero or two EPs.
+n_fock = 5
+â = destroy(n_fock) ⊗ eye(n_fock)
+b̂ = eye(n_fock) ⊗ destroy(n_fock)
+g = 0.01
+mdl = bosonDimer(g=g, approx=[RWA_env])
+dimer(δ) = setproperties(mdl, (ωa=1 + δ[1], ωb=1 - δ[1], γa=0.1 + δ[2], γb=0.1 - δ[2]))
+A = AffineLiouvillian(δ -> liouvillian(Lindbladian(â, b̂, dimer(δ))...).data, 2)
+
+# EP(⋅) returns g_EP ∝ |γa - γb| at δω = 0: rescale to find the δγ where g_EP = g
+δγ_EP = g*0.01/EP(dimer(P2(0, 0.01)))[1]
+disc_λ(δ) = -im .* filter(r -> real(r) > 0, roots_sorted(dimer(δ)))
+
+dimer_loops = [
+    ("circle, 1 EP",                Circle(P2(0, 0.01), 0.01)),
+    ("rectangle, 1 EP",             Polygon([P2(-0.01, 0), P2(0.01, 0), P2(0.01, 0.02), P2(-0.01, 0.02)])),
+    ("circle, no EP",               Circle(P2(0, 0.03), 0.01)),
+    ("circle, both EPs",            Circle(P2(0, 0), 0.01)),
+    ("small circle, 1e-4 from EP",  Circle(P2(0, δγ_EP + 1e-4), 2e-4)),
+]
+us = range(0, 1, 401)
+
+fig = Figure(size=(1000, 1300))
+ax_p = Axis(fig[1, 1]; xlabel="δω", ylabel="δγ", title="loops in parameter space")
+scatter!(ax_p, [0, 0], [δγ_EP, -δγ_EP]; marker=:star5, markersize=14, color=:white, label="EPs")
+for (j, (name, q)) ∈ enumerate(dimer_loops)
+    δs = position.(Ref(q), us)
+    lines!(ax_p, first.(δs), last.(δs); color=Cycled(j + 2), label=name)
+    ax = Axis(fig[fldmod1(j + 1, 2)...]; xlabel="Re ω", ylabel="Im ω", title=name)
+    scatter!(ax, vcat((real.(im .* disc_λ(δ)) for δ ∈ δs[1:4:end])...), vcat((imag.(im .* disc_λ(δ)) for δ ∈ δs[1:4:end])...);
+        color=:gray, markersize=4)
+    pairs0 = eigenpairs_near(A(position(q, 0.)), disc_λ(position(q, 0.)))
+    println(name)
+    for (k, (λ0, r0)) ∈ enumerate(pairs0)
+        t = @elapsed sol, diag = track(A, q, λ0, r0)
+        lands = argmin(abs.(first.(pairs0) .- sol.u[end][end]))
+        dev = maximum(minimum(abs.(sol(u)[end] .- disc_λ(position(q, u)))) for u ∈ us)
+        println("  mode $k → mode $lands,  max |λ - λ_disc| = ", round(dev, sigdigits=2), ",  ", sol.stats.naccept, " steps, ",
+            diag.factorisations, " LU, ", round(t, digits=2), " s")
+        ω = [im*sol(u)[end] for u ∈ us]
+        lines!(ax, real(ω), imag(ω); color=Cycled(k), label="mode $k" * (lands == k ? " (returns)" : " → mode $lands"))
+        scatter!(ax, [real(im*λ0)], [imag(im*λ0)]; color=Cycled(k), marker=:star5, markersize=14)
+    end
+    axislegend(ax; position=:rb, labelsize=10)
+end
+ylims!(ax_p, -0.012, 0.075)                 # room for the legend above the loops
+axislegend(ax_p; position=:ct, labelsize=9)
+fig
+
+
+#%% Driven optomechanics: setup (linearised EP, displaced-frame Liouvillian)
+
+# Linearised fluctuations ≡ bosonDimer with ωa = -(Δ + g x̄) and coupling 2g|α| (linearised_dimer): EP at resonance and
+# 2g|α| = |γa - γb| (linearised_EP). The full model keeps the non-linear term -g d†d (e + e†). It is written in the
+# displaced frame a = α + d, b = β + e (reference at the linearised EP), where n_fock = 6 per mode is converged to ~1e-7.
+# The next two cells work in the plane δ = (Δ, F/F_EP), where L is affine (H is linear in Δ and F).
+mdl = optomech(ωb=1., γa=0.2, γb=0.05, g=0.1, nBa=0., nBb=0., approx=[RWA_env])
+Δ_EP, F_EP, n_branches = linearised_EP(mdl)
+point(δ) = setproperties(mdl, (Δ=δ[1], F=δ[2]*F_EP))
+println("linearised EP: Δ = ", round(Δ_EP, digits=5), ", F = ", round(F_EP, digits=5), ", ", n_branches, " classical branch(es)")
+
+Na, Nb = 6, 6
+â = destroy(Na) ⊗ eye(Nb)
+b̂ = eye(Na) ⊗ destroy(Nb)
+α, β = classical_displacement(point(P2(Δ_EP, 1.0)))
+âd, b̂d = â + α*one(â), b̂ + β*one(b̂)        # displaced frame: the model functions see a = α + d, b = β + e
+A = AffineLiouvillian(δ -> liouvillian(Lindbladian(âd, b̂d, point(δ))...).data, 2)
+
+# starting targets at δ = (Δ, F/F_EP): the linearised modes, λ = -iω (≈ 0.01 from the full ones at g = 0.1)
+linearised_targets(δ) = -im .* filter(r -> real(r) > 0, roots_sorted(linearised_dimer(point(δ))))
+
+
+#%% Driven optomechanics: monodromy around the linearised EP in the (Δ, F) plane
+
+# Needs the setup cell. Both fluctuation modes are tracked around a large and a small circle centred on the linearised EP,
+# and around a control circle away from it.
+om_loops = [
+    ("ρ = 0.05 around the linearised EP", Circle(P2(Δ_EP, 1.0), 0.05)),
+    ("ρ = 0.01 around the linearised EP", Circle(P2(Δ_EP, 1.0), 0.01)),
+    ("control, centre Δ_EP + 0.3",        Circle(P2(Δ_EP + 0.3, 1.0), 0.05)),
+]
+us = range(0, 1, 401)
+
+fig = Figure(size=(1100, 900))
+ax_p = Axis(fig[1, 1]; xlabel="Δ", ylabel="F / F_EP", title="loops in parameter space")
+scatter!(ax_p, [Δ_EP], [1.0]; marker=:star5, markersize=16, color=:white, label="linearised EP")
+for (j, (name, q)) ∈ enumerate(om_loops)
+    δs = position.(Ref(q), us)
+    lines!(ax_p, first.(δs), last.(δs); color=Cycled(j + 2), label=name)
+    ax = Axis(fig[fldmod1(j + 1, 2)...]; xlabel="Re ω", ylabel="Im ω", title=name)
+    pairs0 = eigenpairs_near(A(position(q, 0.)), linearised_targets(position(q, 0.)))
+    println(name)
+    for (k, (λ0, r0)) ∈ enumerate(pairs0)
+        t = @elapsed sol, diag = track(A, q, λ0, r0)
+        lands = argmin(abs.(first.(pairs0) .- sol.u[end][end]))
+        println("  mode $k → mode $lands,  |λ(1) - λ_start| = ", round(abs(sol.u[end][end] - first(pairs0[lands])), sigdigits=2),
+            ",  ", sol.stats.naccept, " steps, ", diag.factorisations, " LU, ", round(t, digits=1), " s")
+        ω = [im*sol(u)[end] for u ∈ us]
+        lines!(ax, real(ω), imag(ω); color=Cycled(k), label="mode $k" * (lands == k ? " (returns)" : " → mode $lands"))
+        scatter!(ax, [real(im*λ0)], [imag(im*λ0)]; color=Cycled(k), marker=:star5, markersize=14)
+    end
+    axislegend(ax; position=:rb, labelsize=10)
+end
+ylims!(ax_p, 0.93, 1.2)                     # room for the legend above the loops
+axislegend(ax_p; position=:ct, labelsize=10)
+fig
+
+
+#%% Driven optomechanics: locating the EP by bisection of rectangles with edge reuse
+
+# Needs the setup cell. The starting square contains the ρ = 0.05 circle, which swaps the pair (previous cell).
+rect0 = (Δ_EP - 0.05, Δ_EP + 0.05, 0.95, 1.05)
+t = @elapsed rect, hist, lines = ep_bisect(A, rect0, linearised_targets; depth=16)
+x0, x1, y0, y1 = rect
+Δ_c, f_c = (x0 + x1)/2, (y0 + y1)/2
+println("bisection: ", length(hist) - 1, " levels, ", length(lines), " tracked lines, ", round(t, digits=1), " s")
+println("EP of the full model: Δ = ", round(Δ_c, digits=5), " ± ", round((x1 - x0)/2, sigdigits=2),
+    ",  F = ", round(f_c*F_EP, digits=5), " ± ", round((y1 - y0)/2*F_EP, sigdigits=2))
+println("shift from the linearised EP: δΔ = ", round(Δ_c - Δ_EP, sigdigits=3), ",  δF = ", round((f_c - 1)*F_EP, sigdigits=3),
+    " (", round(100(f_c - 1), sigdigits=3), " %)")
+
+# midpoint of the pair at the corner (x0, y0) of a box: shift for pair_near (the pair is close near the EP)
+box_midpoint(r) = pair_midpoint(lines, P2(r[1], r[3]), P2(r[2], r[3]))
+
+# Independent confirmation by direct loops of radius 2 × the box diagonal: around the box (swap) and next to it (none)
+ρ = 2hypot(x1 - x0, y1 - y0)
+for (name, q) ∈ (("around the box", Circle(P2(Δ_c, f_c), ρ)), ("control, shifted by 3ρ", Circle(P2(Δ_c + 3ρ, f_c), ρ)))
+    pairs0 = pair_near(A(position(q, 0.)), box_midpoint(rect))
+    sol, _ = track(A, q, pairs0[1]...)
+    println("loop ", name, " (ρ = ", round(ρ, sigdigits=2), "): mode 1 → mode ", argmin(abs.(first.(pairs0) .- sol.u[end][end])))
+end
+
+# Square-root signature: gap of the pair at the box centres against the box size
+sizes = [hypot(r[2] - r[1], r[4] - r[3]) for r ∈ hist]
+gaps = map(hist) do r
+    (λ1, _), (λ2, _) = pair_near(A(P2((r[1] + r[2])/2, (r[3] + r[4])/2)), box_midpoint(r))
+    abs(λ1 - λ2)
+end
+
+fig = Figure(size=(1200, 450))
+ax1 = Axis(fig[1, 1]; xlabel="Δ", ylabel="F / F_EP", title="bisection boxes")
+ax2 = Axis(fig[1, 2]; xlabel="Δ", ylabel="F / F_EP", title="zoom on the last levels")
+for (k, r) ∈ enumerate(hist), ax ∈ (ax1, ax2)
+    lines!(ax, [r[1], r[2], r[2], r[1], r[1]], [r[3], r[3], r[4], r[4], r[3]]; color=k, colorrange=(1, length(hist)), colormap=:viridis)
+end
+for ax ∈ (ax1, ax2)
+    scatter!(ax, [Δ_EP], [1.0]; marker=:star5, markersize=14, color=:white, label="linearised EP")
+    scatter!(ax, [Δ_c], [f_c]; marker=:xcross, markersize=12, color=:red, label="full EP (box centre)")
+end
+zr = hist[min(7, end)]
+limits!(ax2, zr[1], zr[2], zr[3], zr[4])
+axislegend(ax1; position=:rt, labelsize=10)
+ax3 = Axis(fig[1, 3]; xscale=log10, yscale=log10, xlabel="box diagonal", ylabel="|λ₁ - λ₂| at the box centre", title="gap ∝ √size")
+scatter!(ax3, sizes, gaps)
+lines!(ax3, sizes, gaps[end]*sqrt.(sizes ./ sizes[end]); linestyle=:dash, color=:gray, label="∝ √size")
+axislegend(ax3; position=:lt)
 fig

@@ -5,6 +5,7 @@ using CairoMakie
 using MakieStyles
 
 using LinearAlgebra
+using SparseArrays
 using Polynomials
 using Accessors
 
@@ -305,6 +306,156 @@ function dominant_mode(L::QuantumObject, a::QuantumObject, idx; ωmax=3.)
     return complex(abs(real(ω)), imag(ω)), maximum(real, λ)
 end
 
+## Mock Liouvillian with planted, analytically known singularities (test bed for the monodromy tools)
+# Direct sum of small independent Lindblad blocks; each block's frequencies and rates are affine in the two parameters
+# (x, y) ∈ [0, 1]², so the Liouvillian is affine in (x, y), and its spectrum is known in closed form:
+#   DimerBlock      levels |0⟩, |a⟩, |b⟩: single-excitation sector of two coupled damped modes, ωa,b = ω0 ± s(x - x0),
+#                   γa,b = γ0 ± s(y - y0), coupling g/2. Pair of EP2 of the coherences |a⟩⟨0|, |b⟩⟨0| at
+#                   (x0, y0 ± g/2s), λ = -γ0 - iω0 (and conjugate); g = 0: DP at (x0, y0).
+#   DrivenQubit     resonant drive Ω/2 σx, decay γ (Ω, γ affine): line of real-axis EP2 where Ω = γ/4, λ = -3γ/4.
+#   DetunedQubit    H = Δ|e⟩⟨e|, decay γ (Δ affine): the pair -γ/2 ± iΔ touches the real axis on the line Δ = 0
+#                   without coalescing (DP line, no EP).
+# Coherences between different blocks have eigenvalues repeated once per other block (degenerate everywhere), so
+# mock_matrix restricts L to a sector (the block label is conserved):
+#   sector = :coherences (default)  dimers: |x⟩⟨0|, |0⟩⟨x| (closed: the excitation difference is conserved); detuned
+#                                   qubit: |e⟩⟨g|, |g⟩⟨e|; driven qubit: whole block. 20 states, and the only singularities
+#                                   are the planted ones (the blocks' eigenvalues never meet on [0, 1]²).
+#   sector = :within                all |i_k⟩⟨j_k| (35 states). The dimers' populations add, on the real axis: a DP line
+#                                   x = x0 (outside the EP segment), a crossing of two real eigenvalues on y = y0, a 4-fold
+#                                   coalescence at -2γ0 at the EP points, and real crossings between blocks.
+
+abstract type MockBlock end
+struct DimerBlock <: MockBlock
+    center::NTuple{2,Float64}
+    s::Float64
+    ω0::Float64
+    γ0::Float64
+    g::Float64
+end
+struct DrivenQubit <: MockBlock
+    Ω::NTuple{3,Float64}       # Ω = Ω[1] + Ω[2] x + Ω[3] y
+    γ::NTuple{3,Float64}
+end
+struct DetunedQubit <: MockBlock
+    Δ::NTuple{3,Float64}       # Δ = Δ[1] + Δ[2] x + Δ[3] y
+    γ::Float64
+end
+affine3(c, x, y) = c[1] + c[2]*x + c[3]*y
+
+# local Hamiltonian and jump operators of a block at (x, y) (plain matrices; |0⟩ or |g⟩ first)
+function block_terms(b::DimerBlock, x, y)
+    δω, δγ = b.s*(x - b.center[1]), b.s*(y - b.center[2])
+    γa, γb = b.γ0 + δγ, b.γ0 - δγ
+    H = ComplexF64[0 0 0; 0 b.ω0+δω b.g/2; 0 b.g/2 b.ω0-δω]
+    return H, [ComplexF64[0 √(2γa) 0; 0 0 0; 0 0 0], ComplexF64[0 0 √(2γb); 0 0 0; 0 0 0]]
+end
+function block_terms(b::DrivenQubit, x, y)
+    Ω, γ = affine3(b.Ω, x, y), affine3(b.γ, x, y)
+    return ComplexF64[0 Ω/2; Ω/2 0], [ComplexF64[0 √γ; 0 0]]
+end
+block_terms(b::DetunedQubit, x, y) = ComplexF64[0 0; 0 affine3(b.Δ, x, y)], [ComplexF64[0 √b.γ; 0 0]]
+block_dim(b::MockBlock) = size(block_terms(b, 0.5, 0.5)[1], 1)
+
+# Closed-form eigenvalues of each block's own Liouvillian. Dimer and detuned qubit: the only jumps go to the ground level,
+# so L is triangular and its eigenvalues are -i(εᵢ - conj(εⱼ)) over the eigenvalues ε of H_eff = H - (i/2)Σ J†J
+# (ground level ε = 0). Driven qubit: Bloch equations, 0, -γ/2, -3γ/4 ± √(γ²/16 - Ω²).
+function effective_energies(b::DimerBlock, x, y)
+    δω, δγ = b.s*(x - b.center[1]), b.s*(y - b.center[2])
+    r = sqrt(complex((δω - im*δγ)^2 + b.g^2/4))
+    return [0.0im, b.ω0 - im*b.γ0 + r, b.ω0 - im*b.γ0 - r]
+end
+effective_energies(b::DetunedQubit, x, y) = [0.0im, affine3(b.Δ, x, y) - im*b.γ/2]
+# elements |i⟩⟨j| (local levels, ground first) of a block kept in a sector
+sector_elements(b::MockBlock, sector) = (d = block_dim(b); [(i, j) for j ∈ 1:d for i ∈ 1:d])
+sector_elements(b::Union{DimerBlock,DetunedQubit}, sector) =
+    sector == :coherences ? [(i, j) for j ∈ 1:block_dim(b) for i ∈ 1:block_dim(b) if (i == 1) ⊻ (j == 1)] :
+                            [(i, j) for j ∈ 1:block_dim(b) for i ∈ 1:block_dim(b)]
+
+# eigenvalue of the element |i⟩⟨j| (exact for the triangular blocks)
+function block_spectrum(b::MockBlock, x, y; sector=:coherences)
+    ε = effective_energies(b, x, y)
+    return [-im*(ε[i] - conj(ε[j])) for (i, j) ∈ sector_elements(b, sector)]
+end
+function block_spectrum(b::DrivenQubit, x, y; sector=:coherences)
+    Ω, γ = affine3(b.Ω, x, y), affine3(b.γ, x, y)
+    r = sqrt(complex(γ^2/16 - Ω^2))
+    return [0.0im, -γ/2 + 0im, -3γ/4 + r, -3γ/4 - r]
+end
+
+struct mockLiouvillian <: Model
+    x::Float64
+    y::Float64
+    blocks::Vector{MockBlock}
+end
+# Default test bed: a pair of weak EP2 1e-3 apart, a pair of EP2 0.2 apart, an off-axis DP, a real-axis EP line and a
+# DP line. Generic (non-round) values, so that no point or line falls on the nodes of regular or refined grids; all
+# rates stay positive on [0, 1]².
+default_mock_blocks() = MockBlock[
+    DimerBlock((0.3071, 0.2943), 0.1,  1.0, 0.1,  1e-4),    # EP2 pair at (0.3071, 0.2943 ± 5e-4)
+    DimerBlock((0.6113, 0.7031), 0.15, 1.3, 0.15, 0.03),    # EP2 pair at (0.6113, 0.6031) and (0.6113, 0.8031)
+    DimerBlock((0.7489, 0.2617), 0.2,  0.7, 0.2,  0.0),     # DP at (0.7489, 0.2617)
+    DrivenQubit((0.0213, 0.0587, 0.0), (0.1, 0.0, 0.2)),   # real-axis EP line Ω = γ/4: y = 1.174x - 0.074
+    DetunedQubit((-0.3071, 0.5, 0.2133), 0.4),             # DP line 0.5x + 0.2133y = 0.3071 (meets the EP line at λ ≠ -3γ/4)
+]
+mockLiouvillian(; x=0.5, y=0.5, blocks=default_mock_blocks()) = mockLiouvillian(x, y, blocks)
+
+# Block-diagonal H and jump operators of the whole system, with the level ranges of the blocks.
+function block_ranges(mdl::mockLiouvillian)
+    d = block_dim.(mdl.blocks)
+    return [sum(d[1:k-1]) + 1:sum(d[1:k]) for k ∈ eachindex(d)]
+end
+function Lindbladian(mdl::mockLiouvillian)
+    rs = block_ranges(mdl)
+    D = last(last(rs))
+    H = zeros(ComplexF64, D, D)
+    jumps = QuantumObject[]
+    for (b, r) ∈ zip(mdl.blocks, rs)
+        Hb, Jb = block_terms(b, mdl.x, mdl.y)
+        H[r, r] .= Hb
+        for J ∈ Jb
+            Jfull = zeros(ComplexF64, D, D)
+            Jfull[r, r] .= J
+            push!(jumps, Qobj(sparse(Jfull)))
+        end
+    end
+    return Qobj(sparse(H)), jumps
+end
+
+# indices of the sector's elements in the vectorised ρ (column-major), and L restricted to them (sparse)
+function mock_sector(mdl::mockLiouvillian; sector=:coherences)
+    D = last(last(block_ranges(mdl)))
+    return sort([r[i] + D*(r[j] - 1) for (b, r) ∈ zip(mdl.blocks, block_ranges(mdl)) for (i, j) ∈ sector_elements(b, sector)])
+end
+mock_matrix(mdl::mockLiouvillian; sector=:coherences) =
+    (idx = mock_sector(mdl; sector); liouvillian(Lindbladian(mdl)...).data[idx, idx])
+
+# exact spectrum of mock_matrix
+mock_spectrum(mdl::mockLiouvillian; sector=:coherences) =
+    reduce(vcat, block_spectrum(b, mdl.x, mdl.y; sector) for b ∈ mdl.blocks)
+
+# Planted singularities: points (x, y) with their λ (upper or lower half-plane: both conjugates are present), and lines
+# a x + b y + c = 0 (coefficients (a, b, c)) with their kind.
+function mock_singularities(mdl::mockLiouvillian)
+    pts, lines = NamedTuple[], NamedTuple[]
+    for (k, b) ∈ enumerate(mdl.blocks)
+        if b isa DimerBlock
+            λ = -b.γ0 - im*b.ω0
+            if b.g > 0
+                for σ ∈ (-1, 1)
+                    push!(pts, (block=k, kind=:EP2, x=b.center[1], y=b.center[2] + σ*b.g/(2b.s), λ=λ))
+                end
+            else
+                push!(pts, (block=k, kind=:DP, x=b.center[1], y=b.center[2], λ=λ))
+            end
+        elseif b isa DrivenQubit
+            push!(lines, (block=k, kind=:real_EP2, coeffs=(b.Ω[2] - b.γ[2]/4, b.Ω[3] - b.γ[3]/4, b.Ω[1] - b.γ[1]/4)))
+        elseif b isa DetunedQubit
+            push!(lines, (block=k, kind=:DP_line, coeffs=(b.Δ[2], b.Δ[3], b.Δ[1])))
+        end
+    end
+    return pts, lines
+end
+
 
 #%% Single boson: EP at critical damping, Q = ω0/2γ = 1/2
 
@@ -470,6 +621,8 @@ fig
 #   4. bordered system and its linear solves          normalisation, bordered, bordered_mul, StaleLU, solve_bordered!
 #   5. predictor–corrector tracking along a path      tangent, correct, track
 #   6. locating an EP by bisection with edge reuse    TrackedLine, track_line, transport, rect_swaps, ep_bisect
+#   7. systematic scan on a grid (dense spectra)      EdgeMatch, match_spectra, edge_match, cell_monodromy, monodromy_scan,
+#                                                     refine_cells
 # The parametrisation of a path (which model fields its coordinates δ move) and the choice of operators (e.g. a displaced
 # frame) are written where they are used, in the function δ ↦ L(δ) given to AffineLiouvillian.
 
@@ -803,6 +956,277 @@ function ep_bisect(A, rect, corner_targets; depth=12, shift=0.1, kwargs...)
     end
     return rect, history, lines
 end
+
+## 7. Systematic scan on a grid (dense spectra, all eigenvalues at once)
+# For matrices small enough to diagonalise densely, every eigenvalue is followed along every grid edge by matching the
+# spectra at adaptively spaced points: a step is accepted when each eigenvalue moves by less than ρ times its distance
+# to the others. The four edges of a cell compose into a permutation of the eigenvalues at its lower-left corner:
+# a transposition (a b) ⇔ an odd number of EP2 of that pair inside. Along the same loop, the winding of D = (λa - λb)²
+# of a pair that returns to itself counts its EPs with orientation (±1 each) and DPs (±2): an identity with a nonzero
+# winding is an even number of EPs or a DP, told apart by refinement (EPs separate into swapping sub-cells).
+# An exact coalescence on an edge (a real-axis EP or DP line crossing it) stalls the stepping: below hmin the step is
+# forced and the labels involved are flagged ambiguous on that edge (their cells say nothing about that pair).
+
+struct EdgeMatch
+    vals::Matrix{ComplexF64}     # eigenvalues along the edge: row = label at the start node, column = sample
+    perm::Vector{Int}            # label at the start node ↦ label (index) at the end node
+    ambiguous::BitVector         # labels whose matching was forced somewhere on the edge
+end
+
+# Greedy nearest matching of the labelled eigenvalues `cur` to `new` (most certain first): p[i] = index in new of label i.
+# bad[i] when label i moved by more than ρ times its distance to the nearest other eigenvalue.
+function match_spectra(cur, new; ρ=0.2)
+    n = length(cur)
+    p, taken = zeros(Int, n), falses(n)
+    for i ∈ sortperm([minimum(abs.(new .- c)) for c ∈ cur])
+        p[i] = argmin(j -> taken[j] ? Inf : abs(new[j] - cur[i]), 1:n)
+        taken[p[i]] = true
+    end
+    sep = [minimum(abs(cur[i] - cur[k]) for k ∈ 1:n if k != i) for i ∈ 1:n]
+    bad = BitVector([abs(new[p[i]] - cur[i]) > ρ*sep[i] for i ∈ 1:n])
+    return p, bad
+end
+
+# Follows all eigenvalues from a to b (spectra va, vb at the nodes, as returned by eigs_at).
+function edge_match(eigs_at, a::P2, b::P2, va, vb; ρ=0.2, h0=0.05, hmin=1e-7)
+    n = length(va)
+    cur, cols, amb = copy(va), [copy(va)], falses(n)
+    s, h, perm = 0.0, h0, collect(1:n)
+    while s < 1
+        last = h ≥ 1 - s
+        snew = last ? 1.0 : s + h
+        new = last ? vb : eigs_at(a + snew*(b - a))
+        p, bad = match_spectra(cur, new; ρ)
+        if any(bad) && h > hmin
+            h /= 2                                       # refine the step
+            continue
+        end
+        amb .|= bad                                      # forced step (coalescence on the edge)
+        cur = new[p]
+        push!(cols, cur)
+        last && (perm = p)
+        s = snew
+        any(bad) || (h *= 1.5)
+    end
+    return EdgeMatch(reduce(hcat, cols), perm, amb)
+end
+
+# Loop around a cell, counterclockwise from its lower-left corner. Edges as stored: bottom and top from left to right,
+# left and right from bottom to top. Returns the permutation σ of the corner labels, the windings w[a, k] of
+# (λa - λk)² for the pairs that return to themselves (0 otherwise), and the labels ambiguous on some edge of the loop.
+function cell_monodromy(bottom::EdgeMatch, right::EdgeMatch, top::EdgeMatch, left::EdgeMatch)
+    n = length(bottom.perm)
+    σ, amb = zeros(Int, n), falses(n)
+    traj = [ComplexF64[] for _ ∈ 1:n]
+    itop, ileft = invperm(top.perm), invperm(left.perm)
+    for i ∈ 1:n
+        l = i
+        amb[i] |= bottom.ambiguous[l]; append!(traj[i], bottom.vals[l, :]); l = bottom.perm[l]
+        amb[i] |= right.ambiguous[l];  append!(traj[i], right.vals[l, 2:end]); l = right.perm[l]
+        l = itop[l];  amb[i] |= top.ambiguous[l];  append!(traj[i], reverse(top.vals[l, :])[2:end])
+        l = ileft[l]; amb[i] |= left.ambiguous[l]; append!(traj[i], reverse(left.vals[l, :])[2:end])
+        σ[i] = l
+    end
+    w = zeros(Int, n, n)
+    for i ∈ 1:n, k ∈ i+1:n
+        Set((σ[i], σ[k])) == Set((i, k)) || continue     # D closes only for pairs returning to themselves
+        D = (traj[i] .- traj[k]).^2
+        w[i, k] = w[k, i] = round(Int, sum(angle(D[t + 1]/D[t]) for t ∈ 1:length(D) - 1)/2π)
+    end
+    return σ, w, amb
+end
+
+# Scan of the grid xs × ys (eigs_at(δ): all eigenvalues at δ). For every cell: its rectangle, the swapped pairs and the
+# identity pairs with nonzero winding (eigenvalues at the lower-left corner, upper half-plane representative of each
+# conjugate pair, ambiguous labels excluded), longer cycles, and whether some label was ambiguous. Edges in parallel.
+function monodromy_scan(eigs_at, xs, ys; kwargs...)
+    nodes = [eigs_at(P2(x, y)) for x ∈ xs, y ∈ ys]
+    H = Matrix{EdgeMatch}(undef, length(xs) - 1, length(ys))
+    V = Matrix{EdgeMatch}(undef, length(xs), length(ys) - 1)
+    Threads.@threads for k ∈ 1:length(H) + length(V)
+        if k ≤ length(H)
+            i, j = Tuple(CartesianIndices(H)[k])
+            H[i, j] = edge_match(eigs_at, P2(xs[i], ys[j]), P2(xs[i + 1], ys[j]), nodes[i, j], nodes[i + 1, j]; kwargs...)
+        else
+            i, j = Tuple(CartesianIndices(V)[k - length(H)])
+            V[i, j] = edge_match(eigs_at, P2(xs[i], ys[j]), P2(xs[i], ys[j + 1]), nodes[i, j], nodes[i, j + 1]; kwargs...)
+        end
+    end
+    cells = NamedTuple[]
+    for j ∈ 1:length(ys) - 1, i ∈ 1:length(xs) - 1
+        σ, w, amb = cell_monodromy(H[i, j], V[i + 1, j], H[i, j + 1], V[i, j])
+        λ = nodes[i, j]
+        upper(a, b) = imag(λ[a]) + imag(λ[b]) > 0
+        swaps = [(λ[a], λ[σ[a]]) for a ∈ eachindex(σ) if σ[a] > a && σ[σ[a]] == a && !amb[a] && !amb[σ[a]] && upper(a, σ[a])]
+        even = [(λ[a], λ[k], w[a, k]) for a ∈ eachindex(σ) for k ∈ a+1:length(σ)
+                if σ[a] == a && σ[k] == k && w[a, k] != 0 && !amb[a] && !amb[k] && upper(a, k)]
+        cycles = count(a -> σ[a] != a && σ[σ[a]] != a && !amb[a], eachindex(σ))
+        push!(cells, (rect=(xs[i], xs[i + 1], ys[j], ys[j + 1]), swaps=swaps, even=even, cycles=cycles, ambiguous=any(amb)))
+    end
+    return cells
+end
+
+flagged(c) = !isempty(c.swaps) || !isempty(c.even) || c.cycles > 0
+
+# Recursive refinement of the flagged cells (2 × 2 sub-cells per level, `depth` levels): returns the flagged leaves.
+function refine_cells(eigs_at, cells, depth; kwargs...)
+    depth == 0 && return filter(flagged, cells)
+    leaves = NamedTuple[]
+    for c ∈ filter(flagged, cells)
+        x0, x1, y0, y1 = c.rect
+        sub = monodromy_scan(eigs_at, range(x0, x1, 3), range(y0, y1, 3); kwargs...)
+        append!(leaves, refine_cells(eigs_at, sub, depth - 1; kwargs...))
+    end
+    return leaves
+end
+
+
+#%% Mock Liouvillian: spectrum and planted singularities
+
+# Test bed for the monodromy tools (see mockLiouvillian): a Lindblad sector affine in (x, y) ∈ [0, 1]², with an exactly
+# known spectrum. This cell checks it: closed-form vs numerical eigenvalues (both sectors), affinity, and the scaling of
+# the gap at every planted singularity (√ at an EP2, linear at a DP), then maps the smallest gap over the square in the
+# default coherence sector, where the planted singularities are the only ones.
+mock = mockLiouvillian()
+mock_at(δ) = setproperties(mock, (x=δ[1], y=δ[2]))
+pts, lines = mock_singularities(mock)
+for p ∈ pts
+    println("planted ", rpad(p.kind, 4), " block $(p.block) at (x, y) = (", p.x, ", ", round(p.y, digits=6), "),  λ = ", p.λ)
+end
+for l ∈ lines
+    println("planted ", rpad(l.kind, 9), " block $(l.block): ", l.coeffs[1], " x + ", l.coeffs[2], " y + ", l.coeffs[3], " = 0")
+end
+
+# closed form vs numerical spectrum (greedy matching) at random points, and affinity in (x, y)
+function match_error(a, b)
+    b, e = copy(b), 0.0
+    for v ∈ a
+        k = argmin(abs.(b .- v))
+        e = max(e, abs(b[k] - v))
+        deleteat!(b, k)
+    end
+    return e
+end
+for sector ∈ (:coherences, :within)
+    err = maximum(begin
+                      δ = rand(2)
+                      match_error(eigvals(Matrix(mock_matrix(mock_at(δ); sector))), mock_spectrum(mock_at(δ); sector))
+                  end for _ ∈ 1:20)
+    println("sector $sector ($(length(mock_sector(mock; sector))) states): max |λ_numerical - λ_closed form| over 20 random points = ", err)
+end
+A_mock = AffineLiouvillian(δ -> mock_matrix(mock_at(δ)), 2)
+println("affine in (x, y): accepted by AffineLiouvillian")
+
+# gap scaling at the planted singularities, from the numerical eigenvalues: exponent of gap ∝ distance^p
+pair_gap(δ, λ0) = (v = eigvals(Matrix(mock_matrix(mock_at(δ)))); i = sortperm(abs.(v .- λ0)); abs(v[i[1]] - v[i[2]]))
+exponent(gap) = log10(gap(1e-4)/gap(1e-6))/2
+for p ∈ pts
+    println(rpad("$(p.kind) at ($(p.x), $(round(p.y, digits=4)))", 30), " exponent ",
+        round(exponent(d -> pair_gap(P2(p.x + d, p.y), p.λ)), digits=3), "  (expected ", p.kind == :EP2 ? 0.5 : 1.0, ")")
+end
+for l ∈ lines
+    a, b, c = l.coeffs
+    n = P2(a, b)/hypot(a, b)
+    δ0 = P2(-(0.6b + c)/a, 0.6)                         # the point of the line at y = 0.6, approached along its normal
+    # the coalescing pair: -3γ/4 ± ... for the driven qubit (3rd entry), -γ/2 ± iΔ for the detuned one (1st entry)
+    λ0 = block_spectrum(mock.blocks[l.block], δ0...)[l.kind == :real_EP2 ? 3 : 1]
+    println(rpad("$(l.kind) at ($(δ0[1]), $(round(δ0[2], digits=4)))", 30), " exponent ",
+        round(exponent(d -> pair_gap(δ0 + d*n, λ0)), digits=3), "  (expected ", l.kind == :real_EP2 ? 0.5 : 1.0, ")")
+end
+
+# map of the smallest gap between eigenvalues (steady states, one per block, excluded) with the planted structures
+xs = ys = range(0, 1, 201)
+gapmap = [begin
+              v = filter(λ -> abs(λ) > 1e-9, mock_spectrum(mock_at((x, y))))
+              minimum(abs(v[i] - v[j]) for i ∈ eachindex(v) for j ∈ i+1:length(v))
+          end for x ∈ xs, y ∈ ys]
+fig = Figure(size=(760, 650))
+ax = Axis(fig[1, 1]; xlabel="x", ylabel="y", title="mock Liouvillian (coherence sector): log₁₀ smallest gap", aspect=DataAspect(), limits=((0, 1), (0, 1)))
+hm = heatmap!(ax, xs, ys, log10.(gapmap); colormap=:viridis)
+Colorbar(fig[1, 2], hm)
+for l ∈ lines
+    a, b, c = l.coeffs
+    lines!(ax, [0, 1], [-c/b, -(a + c)/b]; color=:white, linestyle=(l.kind == :real_EP2 ? :solid : :dash),
+        label=(l.kind == :real_EP2 ? "real-axis EP2 line" : "DP line"))
+end
+for (kind, marker) ∈ ((:EP2, :star5), (:DP, :circle))
+    sel = filter(p -> p.kind == kind, pts)
+    scatter!(ax, [p.x for p ∈ sel], [p.y for p ∈ sel]; marker, markersize=14, color=:red, strokecolor=:white, strokewidth=1,
+        label="planted $kind")
+end
+axislegend(ax; position=:lt, labelsize=11)
+fig
+
+
+#%% Mock Liouvillian: systematic monodromy scan
+
+# Needs the mock check cell (mock, mock_at, pts, lines, A_mock). All 18 eigenvalues of the coherence sector are followed
+# along the edges of a 39 × 39 grid, each cell gets a
+# permutation, and the flagged cells (a swap, or an identity with nonzero winding) are refined 7 times (cells of 2e-4,
+# enough to separate the weak EP2 pair 1e-3 apart). Expected: one swapping leaf at each planted EP2, a DP (winding ±2,
+# no swap at every level) at the planted DP, ambiguous cells only along the two real-axis lines, nothing else.
+# scan_sector = :within adds the dimers' populations and their real-axis structures (see mockLiouvillian).
+scan_sector = :coherences
+A_scan = AffineLiouvillian(δ -> mock_matrix(mock_at(δ); sector=scan_sector), 2)
+eigs_at(δ) = eigvals(Matrix(A_scan(δ)))
+xs = ys = range(0, 1, 39)
+t_scan = @elapsed cells = monodromy_scan(eigs_at, xs, ys)
+t_refine = @elapsed leaves = refine_cells(eigs_at, cells, 7)
+println("sector $scan_sector, scan: ", length(cells), " cells in ", round(t_scan, digits=2), " s; ", count(flagged, cells), " flagged, ",
+    count(c -> c.ambiguous, cells), " with ambiguous labels.  Refinement (7 levels): ", length(leaves), " leaves in ",
+    round(t_refine, digits=2), " s")
+
+# leaves against the planted points
+inside(c, p) = c.rect[1] ≤ p.x ≤ c.rect[2] && c.rect[3] ≤ p.y ≤ c.rect[4]
+center(c) = ((c.rect[1] + c.rect[2])/2, (c.rect[3] + c.rect[4])/2)
+used = falses(length(leaves))
+for p ∈ pts
+    k = findall(c -> inside(c, p), leaves)
+    used[k] .= true
+    found = isempty(k) ? "NOT FOUND" : begin
+        c = leaves[k[1]]
+        kind = !isempty(c.swaps) ? "swap (EP2)" : !isempty(c.even) ? "identity, winding $(c.even[1][3]) (DP)" : "?"
+        "$kind in a leaf of size $(round(c.rect[2] - c.rect[1], sigdigits=2)), centre off by " *
+        "$(round(hypot((center(c) .- (p.x, p.y))...), sigdigits=2)), λ ≈ $(round(conj(isempty(c.swaps) ? c.even[1][1] : c.swaps[1][1]), digits=3))"
+    end
+    println("planted ", rpad(p.kind, 4), " at (", p.x, ", ", round(p.y, digits=4), "): ", found)
+end
+println("leaves not at a planted point: ", count(!, used))
+
+# ambiguous coarse cells: are they all crossed by one of the two lines?
+crossed(c, l) = (f = [l.coeffs[1]*x + l.coeffs[2]*y + l.coeffs[3] for x ∈ c.rect[1:2] for y ∈ c.rect[3:4]]; minimum(f) ≤ 1e-12 && maximum(f) ≥ -1e-12)
+amb = filter(c -> c.ambiguous, cells)
+println("ambiguous cells crossed by a real-axis line: ", count(c -> any(l -> crossed(c, l), lines), amb), " / ", length(amb),
+    ";  cells crossed by a line: ", count(c -> any(l -> crossed(c, l), lines), cells))
+
+fig = Figure(size=(1150, 560))
+ax = Axis(fig[1, 1]; xlabel="x", ylabel="y", title="39 × 39 scan, sector $scan_sector", aspect=DataAspect(), limits=((0, 1), (0, 1)))
+rect_poly(r) = Point2f[(r[1], r[3]), (r[2], r[3]), (r[2], r[4]), (r[1], r[4])]
+for c ∈ cells
+    col = !isempty(c.swaps) ? :red : !isempty(c.even) ? :orange : c.ambiguous ? (:gray, 0.6) : nothing
+    col === nothing || poly!(ax, rect_poly(c.rect); color=col)
+end
+for l ∈ lines
+    a, b, cc = l.coeffs
+    lines!(ax, [0, 1], [-cc/b, -(a + cc)/b]; color=:white, linestyle=(l.kind == :real_EP2 ? :solid : :dash))
+end
+scatter!(ax, [p.x for p ∈ pts], [p.y for p ∈ pts]; marker=[p.kind == :EP2 ? :star5 : :circle for p ∈ pts],
+    markersize=12, color=:transparent, strokecolor=:white, strokewidth=1.5)
+# zoom on the weak EP2 pair: refined leaves
+pw = filter(p -> p.block == 1, pts)
+xw, yw = pw[1].x, (pw[1].y + pw[2].y)/2
+ax2 = Axis(fig[1, 2]; xlabel="x", ylabel="y", title="weak EP2 pair: refined leaves", aspect=DataAspect(),
+    limits=((xw - 1e-3, xw + 1e-3), (yw - 1e-3, yw + 1e-3)))
+for c ∈ leaves
+    poly!(ax2, rect_poly(c.rect); color=(!isempty(c.swaps) ? :red : :orange), strokecolor=:white, strokewidth=0.5)
+end
+scatter!(ax2, [p.x for p ∈ pw], [p.y for p ∈ pw]; marker=:star5, markersize=16, color=:transparent, strokecolor=:white, strokewidth=1.5)
+Legend(fig[2, 1:2], [PolyElement(color=:red), PolyElement(color=:orange), PolyElement(color=(:gray, 0.6)),
+        LineElement(color=:white), LineElement(color=:white, linestyle=:dash), MarkerElement(marker=:star5, color=:transparent, strokecolor=:white, strokewidth=1.5),
+        MarkerElement(marker=:circle, color=:transparent, strokecolor=:white, strokewidth=1.5)],
+    ["swap (odd number of EP2)", "identity, nonzero winding", "ambiguous labels", "real-axis EP2 line", "DP line", "planted EP2", "planted DP"];
+    orientation=:horizontal, nbanks=2, tellheight=true)
+fig
 
 
 #%% Monodromy, coupled bosons: tracking the Liouvillian modes around the EP (Lindblad, RWA_env)

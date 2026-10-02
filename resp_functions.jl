@@ -389,13 +389,14 @@ struct mockLiouvillian <: Model
 end
 # Default test bed: a pair of weak EP2 1e-3 apart, a pair of EP2 0.2 apart, an off-axis DP, a real-axis EP line and a
 # DP line. Generic (non-round) values, so that no point or line falls on the nodes of regular or refined grids; all
-# rates stay positive on [0, 1]².
+# rates stay positive on [0, 1]². Some eigenvalues have a constant real part (-2γ0 for a dimer's population pair, -γ/2
+# and -γ for the detuned qubit): these constants are kept distinct, otherwise two such eigenvalues would cross on a line.
 default_mock_blocks() = MockBlock[
     DimerBlock((0.3071, 0.2943), 0.1,  1.0, 0.1,  1e-4),    # EP2 pair at (0.3071, 0.2943 ± 5e-4)
     DimerBlock((0.6113, 0.7031), 0.15, 1.3, 0.15, 0.03),    # EP2 pair at (0.6113, 0.6031) and (0.6113, 0.8031)
     DimerBlock((0.7489, 0.2617), 0.2,  0.7, 0.2,  0.0),     # DP at (0.7489, 0.2617)
     DrivenQubit((0.0213, 0.0587, 0.0), (0.1, 0.0, 0.2)),   # real-axis EP line Ω = γ/4: y = 1.174x - 0.074
-    DetunedQubit((-0.3071, 0.5, 0.2133), 0.4),             # DP line 0.5x + 0.2133y = 0.3071 (meets the EP line at λ ≠ -3γ/4)
+    DetunedQubit((-0.3071, 0.5, 0.2133), 0.43),            # DP line 0.5x + 0.2133y = 0.3071 (meets the EP line at λ ≠ -3γ/4)
 ]
 mockLiouvillian(; x=0.5, y=0.5, blocks=default_mock_blocks()) = mockLiouvillian(x, y, blocks)
 
@@ -623,6 +624,7 @@ fig
 #   6. locating an EP by bisection with edge reuse    TrackedLine, track_line, transport, rect_swaps, ep_bisect
 #   7. systematic scan on a grid (dense spectra)      EdgeMatch, match_spectra, edge_match, cell_monodromy, monodromy_scan,
 #                                                     refine_cells
+#   8. systematic scan by eigenpair tracking          TrackedEdge, track_edge, match_labels, tracked_scan, refine_tracked
 # The parametrisation of a path (which model fields its coordinates δ move) and the choice of operators (e.g. a displaced
 # frame) are written where they are used, in the function δ ↦ L(δ) given to AffineLiouvillian.
 
@@ -966,79 +968,90 @@ end
 # winding is an even number of EPs or a DP, told apart by refinement (EPs separate into swapping sub-cells).
 # An exact coalescence on an edge (a real-axis EP or DP line crossing it) stalls the stepping: below hmin the step is
 # forced and the labels involved are flagged ambiguous on that edge (their cells say nothing about that pair).
+# Eigenvalues exactly degenerate at a sample (within degen_tol, e.g. one steady state per block of a direct sum) are
+# matched among themselves arbitrarily: their distances ignore each other, and they are flagged degenerate (excluded
+# from the results, without making the cell ambiguous). maxsamples caps the work per edge.
 
 struct EdgeMatch
     vals::Matrix{ComplexF64}     # eigenvalues along the edge: row = label at the start node, column = sample
     perm::Vector{Int}            # label at the start node ↦ label (index) at the end node
     ambiguous::BitVector         # labels whose matching was forced somewhere on the edge
+    degenerate::BitVector        # labels exactly degenerate with another one somewhere on the edge
 end
 
 # Greedy nearest matching of the labelled eigenvalues `cur` to `new` (most certain first): p[i] = index in new of label i.
-# bad[i] when label i moved by more than ρ times its distance to the nearest other eigenvalue.
-function match_spectra(cur, new; ρ=0.2)
+# bad[i] when label i moved by more than ρ times its distance to the nearest eigenvalue not exactly degenerate with it;
+# degen[i] when it is exactly degenerate (within degen_tol) with another one.
+function match_spectra(cur, new; ρ=0.2, degen_tol=1e-10)
     n = length(cur)
     p, taken = zeros(Int, n), falses(n)
     for i ∈ sortperm([minimum(abs.(new .- c)) for c ∈ cur])
         p[i] = argmin(j -> taken[j] ? Inf : abs(new[j] - cur[i]), 1:n)
         taken[p[i]] = true
     end
-    sep = [minimum(abs(cur[i] - cur[k]) for k ∈ 1:n if k != i) for i ∈ 1:n]
+    degen = BitVector([any(abs(cur[i] - cur[k]) ≤ degen_tol for k ∈ 1:n if k != i) for i ∈ 1:n])
+    sep = [minimum((abs(cur[i] - cur[k]) for k ∈ 1:n if k != i && abs(cur[i] - cur[k]) > degen_tol); init=Inf) for i ∈ 1:n]
     bad = BitVector([abs(new[p[i]] - cur[i]) > ρ*sep[i] for i ∈ 1:n])
-    return p, bad
+    return p, bad, degen
 end
 
 # Follows all eigenvalues from a to b (spectra va, vb at the nodes, as returned by eigs_at).
-function edge_match(eigs_at, a::P2, b::P2, va, vb; ρ=0.2, h0=0.05, hmin=1e-7)
+function edge_match(eigs_at, a::P2, b::P2, va, vb; ρ=0.2, h0=0.05, hmin=1e-7, degen_tol=1e-10, maxsamples=10_000)
     n = length(va)
-    cur, cols, amb = copy(va), [copy(va)], falses(n)
-    s, h, perm = 0.0, h0, collect(1:n)
+    cur, cols, amb, deg = copy(va), [copy(va)], falses(n), falses(n)
+    s, h, perm, evals = 0.0, h0, collect(1:n), 0
     while s < 1
+        (evals += 1) > maxsamples && error("edge_match: more than $maxsamples spectra on the edge $a → $b")
         last = h ≥ 1 - s
         snew = last ? 1.0 : s + h
         new = last ? vb : eigs_at(a + snew*(b - a))
-        p, bad = match_spectra(cur, new; ρ)
+        p, bad, degen = match_spectra(cur, new; ρ, degen_tol)
         if any(bad) && h > hmin
             h /= 2                                       # refine the step
             continue
         end
         amb .|= bad                                      # forced step (coalescence on the edge)
+        deg .|= degen
         cur = new[p]
         push!(cols, cur)
         last && (perm = p)
         s = snew
         any(bad) || (h *= 1.5)
     end
-    return EdgeMatch(reduce(hcat, cols), perm, amb)
+    return EdgeMatch(reduce(hcat, cols), perm, amb, deg)
 end
 
 # Loop around a cell, counterclockwise from its lower-left corner. Edges as stored: bottom and top from left to right,
 # left and right from bottom to top. Returns the permutation σ of the corner labels, the windings w[a, k] of
-# (λa - λk)² for the pairs that return to themselves (0 otherwise), and the labels ambiguous on some edge of the loop.
+# (λa - λk)² for the pairs that return to themselves (0 otherwise), and the labels ambiguous, resp. degenerate, on some
+# edge of the loop.
 function cell_monodromy(bottom::EdgeMatch, right::EdgeMatch, top::EdgeMatch, left::EdgeMatch)
     n = length(bottom.perm)
-    σ, amb = zeros(Int, n), falses(n)
+    σ, amb, deg = zeros(Int, n), falses(n), falses(n)
     traj = [ComplexF64[] for _ ∈ 1:n]
     itop, ileft = invperm(top.perm), invperm(left.perm)
     for i ∈ 1:n
         l = i
-        amb[i] |= bottom.ambiguous[l]; append!(traj[i], bottom.vals[l, :]); l = bottom.perm[l]
-        amb[i] |= right.ambiguous[l];  append!(traj[i], right.vals[l, 2:end]); l = right.perm[l]
-        l = itop[l];  amb[i] |= top.ambiguous[l];  append!(traj[i], reverse(top.vals[l, :])[2:end])
-        l = ileft[l]; amb[i] |= left.ambiguous[l]; append!(traj[i], reverse(left.vals[l, :])[2:end])
+        amb[i] |= bottom.ambiguous[l]; deg[i] |= bottom.degenerate[l]; append!(traj[i], bottom.vals[l, :]); l = bottom.perm[l]
+        amb[i] |= right.ambiguous[l];  deg[i] |= right.degenerate[l];  append!(traj[i], right.vals[l, 2:end]); l = right.perm[l]
+        l = itop[l];  amb[i] |= top.ambiguous[l];  deg[i] |= top.degenerate[l];  append!(traj[i], reverse(top.vals[l, :])[2:end])
+        l = ileft[l]; amb[i] |= left.ambiguous[l]; deg[i] |= left.degenerate[l]; append!(traj[i], reverse(left.vals[l, :])[2:end])
         σ[i] = l
     end
     w = zeros(Int, n, n)
     for i ∈ 1:n, k ∈ i+1:n
         Set((σ[i], σ[k])) == Set((i, k)) || continue     # D closes only for pairs returning to themselves
+        (deg[i] || deg[k]) && continue                   # D vanishes for exactly degenerate labels
         D = (traj[i] .- traj[k]).^2
         w[i, k] = w[k, i] = round(Int, sum(angle(D[t + 1]/D[t]) for t ∈ 1:length(D) - 1)/2π)
     end
-    return σ, w, amb
+    return σ, w, amb, deg
 end
 
 # Scan of the grid xs × ys (eigs_at(δ): all eigenvalues at δ). For every cell: its rectangle, the swapped pairs and the
 # identity pairs with nonzero winding (eigenvalues at the lower-left corner, upper half-plane representative of each
-# conjugate pair, ambiguous labels excluded), longer cycles, and whether some label was ambiguous. Edges in parallel.
+# conjugate pair, ambiguous and degenerate labels excluded), longer cycles, and whether some label was ambiguous.
+# Edges in parallel.
 function monodromy_scan(eigs_at, xs, ys; kwargs...)
     nodes = [eigs_at(P2(x, y)) for x ∈ xs, y ∈ ys]
     H = Matrix{EdgeMatch}(undef, length(xs) - 1, length(ys))
@@ -1054,13 +1067,14 @@ function monodromy_scan(eigs_at, xs, ys; kwargs...)
     end
     cells = NamedTuple[]
     for j ∈ 1:length(ys) - 1, i ∈ 1:length(xs) - 1
-        σ, w, amb = cell_monodromy(H[i, j], V[i + 1, j], H[i, j + 1], V[i, j])
+        σ, w, amb, deg = cell_monodromy(H[i, j], V[i + 1, j], H[i, j + 1], V[i, j])
         λ = nodes[i, j]
+        ok = .!(amb .| deg)
         upper(a, b) = imag(λ[a]) + imag(λ[b]) > 0
-        swaps = [(λ[a], λ[σ[a]]) for a ∈ eachindex(σ) if σ[a] > a && σ[σ[a]] == a && !amb[a] && !amb[σ[a]] && upper(a, σ[a])]
+        swaps = [(λ[a], λ[σ[a]]) for a ∈ eachindex(σ) if σ[a] > a && σ[σ[a]] == a && ok[a] && ok[σ[a]] && upper(a, σ[a])]
         even = [(λ[a], λ[k], w[a, k]) for a ∈ eachindex(σ) for k ∈ a+1:length(σ)
-                if σ[a] == a && σ[k] == k && w[a, k] != 0 && !amb[a] && !amb[k] && upper(a, k)]
-        cycles = count(a -> σ[a] != a && σ[σ[a]] != a && !amb[a], eachindex(σ))
+                if σ[a] == a && σ[k] == k && w[a, k] != 0 && ok[a] && ok[k] && upper(a, k)]
+        cycles = count(a -> σ[a] != a && σ[σ[a]] != a && ok[a], eachindex(σ))
         push!(cells, (rect=(xs[i], xs[i + 1], ys[j], ys[j + 1]), swaps=swaps, even=even, cycles=cycles, ambiguous=any(amb)))
     end
     return cells
@@ -1076,6 +1090,126 @@ function refine_cells(eigs_at, cells, depth; kwargs...)
         x0, x1, y0, y1 = c.rect
         sub = monodromy_scan(eigs_at, range(x0, x1, 3), range(y0, y1, 3); kwargs...)
         append!(leaves, refine_cells(eigs_at, sub, depth - 1; kwargs...))
+    end
+    return leaves
+end
+
+## 8. Systematic scan by eigenpair tracking (no diagonalisation along the way)
+# The eigenpairs of a window are given once, at the lower-left node, and every grid edge is followed with the
+# predictor–corrector tracker (track, one ODE per eigenpair). Labels are carried to every node along a spanning tree
+# (the bottom row, then every column upwards), so tree edges map labels to themselves. Every other (horizontal) edge is
+# tracked from its left node and its end values are matched to the labels of its right node: a cell's permutation is
+# inv(P_top) ∘ P_bottom. Windings of (λa - λb)² use the solver's own (adaptive) steps. A tracked eigenvalue that ends on
+# none of the labels (EP with an eigenvalue outside the window, or a failed integration) is flagged for its cells.
+
+struct TrackedEdge
+    t::Vector{Vector{Float64}}           # per start label: the solver's steps along the edge (empty if failed)
+    λ::Vector{Vector{ComplexF64}}        # per start label: the eigenvalue at those steps
+    ends::Vector{Any}                    # per start label: final eigenpair (λ, r), or nothing
+end
+
+# Tracks the eigenpairs `pairs` (nothing for a lost label) from a to b; threaded over the eigenpairs if `threaded`.
+function track_edge(A, a::P2, b::P2, pairs; threaded=false, kwargs...)
+    n = length(pairs)
+    t = [Float64[] for _ ∈ 1:n]
+    λ = [ComplexF64[] for _ ∈ 1:n]
+    ends = Vector{Any}(nothing, n)
+    function one(k)
+        pairs[k] === nothing && return
+        sol = try
+            track(A, Segment(a, b), pairs[k]...; kwargs...)[1]
+        catch
+            nothing
+        end
+        (sol === nothing || string(sol.retcode) != "Success") && return
+        t[k], λ[k], ends[k] = sol.t, [y[end] for y ∈ sol.u], (sol.u[end][end], sol.u[end][1:end-1])
+    end
+    threaded ? Threads.@threads(for k ∈ 1:n; one(k); end) : foreach(one, 1:n)
+    return TrackedEdge(t, λ, ends)
+end
+
+# label (index in `targets`) on which each tracked end eigenvalue lands, 0 if none within tol (relative to 1 + |λ|)
+function match_labels(ends, targets; tol=1e-7)
+    map(ends) do e
+        e === nothing && return 0
+        d = [tg === nothing ? Inf : abs(tg[1] - e[1]) for tg ∈ targets]
+        j = argmin(d)
+        return d[j] ≤ tol*(1 + abs(e[1])) ? j : 0
+    end
+end
+
+# change of arg (λa - λb)² along an edge, for its start labels a and b. Between two points of the union of their
+# solver steps both eigenvalues are interpolated linearly, so d = λa - λb moves on a straight segment, whose change of
+# arg seen from 0 is exactly angle(d₁/d₀) ∈ (-π, π): the change for D = d² is twice the sum. (Taking angle(D₁/D₀)
+# instead aliases when one step turns D by more than π, e.g. the solver crossing a DP's neighbourhood in one step.)
+function arg_increment(e::TrackedEdge, a, b)
+    interp(t, v, x) = (k = clamp(searchsortedlast(t, x), 1, length(t) - 1); w = (x - t[k])/(t[k + 1] - t[k]); (1 - w)*v[k] + w*v[k + 1])
+    ss = sort(unique([e.t[a]; e.t[b]]))
+    d = [interp(e.t[a], e.λ[a], x) - interp(e.t[b], e.λ[b], x) for x ∈ ss]
+    return 2sum(angle(d[k + 1]/d[k]) for k ∈ 1:length(d) - 1)
+end
+
+# Scan of the grid xs × ys from the eigenpairs `start_pairs` at (xs[1], ys[1]). Returns one record per cell: its
+# rectangle, the swapped pairs and the identity pairs with nonzero winding (eigenvalues at its lower-left corner), the
+# number of flagged labels, and the eigenpairs at its lower-left corner (to refine it without diagonalising).
+function tracked_scan(A, xs, ys, start_pairs; kwargs...)
+    nx, ny, n = length(xs), length(ys), length(start_pairs)
+    node = Matrix{Vector{Any}}(undef, nx, ny)
+    node[1, 1] = Any[start_pairs...]
+    H = Matrix{TrackedEdge}(undef, nx - 1, ny)
+    V = Matrix{TrackedEdge}(undef, nx, ny - 1)
+    for i ∈ 1:nx - 1                                     # tree: bottom row, eigenpairs in parallel
+        H[i, 1] = track_edge(A, P2(xs[i], ys[1]), P2(xs[i + 1], ys[1]), node[i, 1]; threaded=true, kwargs...)
+        node[i + 1, 1] = H[i, 1].ends
+    end
+    Threads.@threads for i ∈ 1:nx                        # tree: every column upwards, columns in parallel
+        for j ∈ 1:ny - 1
+            V[i, j] = track_edge(A, P2(xs[i], ys[j]), P2(xs[i], ys[j + 1]), node[i, j]; kwargs...)
+            node[i, j + 1] = V[i, j].ends
+        end
+    end
+    jobs = [(i, j) for i ∈ 1:nx - 1 for j ∈ 2:ny]       # the other edges, in parallel
+    Threads.@threads for k ∈ eachindex(jobs)
+        i, j = jobs[k]
+        H[i, j] = track_edge(A, P2(xs[i], ys[j]), P2(xs[i + 1], ys[j]), node[i, j]; kwargs...)
+    end
+    P = [match_labels(H[i, j].ends, node[i + 1, j]) for i ∈ 1:nx - 1, j ∈ 1:ny]
+
+    cells = NamedTuple[]
+    for j ∈ 1:ny - 1, i ∈ 1:nx - 1
+        Pb, Pt = P[i, j], P[i, j + 1]
+        σ, bad = zeros(Int, n), falses(n)
+        for a ∈ 1:n
+            b = Pb[a]                                    # label at the lower-right corner
+            l = b == 0 ? nothing : findfirst(==(b), Pt)  # label at the upper-left corner whose top edge ends on b
+            if l === nothing || node[i + 1, j + 1][b] === nothing || node[i, j + 1][l] === nothing
+                bad[a] = true
+            else
+                σ[a] = l
+            end
+        end
+        w(a, k) = round(Int, (arg_increment(H[i, j], a, k) + arg_increment(V[i + 1, j], Pb[a], Pb[k])
+                              - arg_increment(H[i, j + 1], σ[a], σ[k]) - arg_increment(V[i, j], σ[a], σ[k]))/2π)
+        λc = [p === nothing ? NaN + 0im : p[1] for p ∈ node[i, j]]
+        swaps = [(λc[a], λc[σ[a]]) for a ∈ 1:n if !bad[a] && σ[a] > a && σ[σ[a]] == a]
+        even = [(λc[a], λc[k], w(a, k)) for a ∈ 1:n for k ∈ a+1:n
+                if !bad[a] && !bad[k] && σ[a] == a && σ[k] == k && w(a, k) != 0]
+        cycles = count(a -> !bad[a] && σ[a] != a && !bad[σ[a]] && σ[σ[a]] != a, 1:n)   # labels in cycles of length ≥ 3
+        push!(cells, (rect=(xs[i], xs[i + 1], ys[j], ys[j + 1]), swaps=swaps, even=even, cycles=cycles,
+                      nbad=count(bad), corner=node[i, j]))
+    end
+    return cells
+end
+
+# Recursive refinement of the flagged cells (2 × 2 sub-cells per level), each sub-grid starting from the eigenpairs
+# tracked to its cell's corner: no diagonalisation. Returns the flagged leaves.
+function refine_tracked(A, cells, depth; kwargs...)
+    depth == 0 && return filter(flagged, cells)
+    leaves = NamedTuple[]
+    for c ∈ filter(flagged, cells)
+        x0, x1, y0, y1 = c.rect
+        sub = tracked_scan(A, range(x0, x1, 3), range(y0, y1, 3), c.corner; kwargs...)
+        append!(leaves, refine_tracked(A, sub, depth - 1; kwargs...))
     end
     return leaves
 end
@@ -1227,6 +1361,226 @@ Legend(fig[2, 1:2], [PolyElement(color=:red), PolyElement(color=:orange), PolyEl
     ["swap (odd number of EP2)", "identity, nonzero winding", "ambiguous labels", "real-axis EP2 line", "DP line", "planted EP2", "planted DP"];
     orientation=:horizontal, nbanks=2, tellheight=true)
 fig
+
+
+#%% Mock Liouvillian: monodromy scan by eigenpair tracking (one diagonalisation)
+
+# Needs the mock check cell (mock, mock_at, pts, lines). Same scan as the previous cell, but without diagonalising along
+# the way: the spectrum is computed once, at (0, 0), the window (here: the eigenvalues with Im λ > 0) is followed along
+# every grid edge with the predictor–corrector tracker (tracked_scan), and flagged cells are refined from the eigenpairs
+# carried to their corners (refine_tracked). Expected: as for the matching scan, but the tracker follows the pairs
+# smoothly through the real-axis DP line instead of flagging those cells.
+A_tr = AffineLiouvillian(δ -> mock_matrix(mock_at(δ)), 2)
+F0 = eigen(Matrix(A_tr(P2(0, 0))))                    # the only diagonalisation
+window = findall(λ -> imag(λ) > 1e-8, F0.values)
+start = [(F0.values[k], F0.vectors[:, k]) for k ∈ window]
+println("window at (0, 0): ", length(start), " eigenvalues")
+
+xs = ys = range(0, 1, 39)
+t_scan = @elapsed tcells = tracked_scan(A_tr, xs, ys, start)
+t_refine = @elapsed tleaves = refine_tracked(A_tr, tcells, 7)
+println("tracked scan: ", length(tcells), " cells in ", round(t_scan, digits=1), " s; ", count(flagged, tcells), " flagged, ",
+    count(c -> c.nbad > 0, tcells), " with flagged labels.  Refinement (7 levels): ", length(tleaves), " leaves in ",
+    round(t_refine, digits=1), " s")
+
+inside(c, p) = c.rect[1] ≤ p.x ≤ c.rect[2] && c.rect[3] ≤ p.y ≤ c.rect[4]
+center(c) = ((c.rect[1] + c.rect[2])/2, (c.rect[3] + c.rect[4])/2)
+used = falses(length(tleaves))
+for p ∈ pts
+    k = findall(c -> inside(c, p), tleaves)
+    used[k] .= true
+    found = isempty(k) ? "NOT FOUND" : begin
+        c = tleaves[k[1]]
+        kind = !isempty(c.swaps) ? "swap (EP2)" : !isempty(c.even) ? "identity, winding $(c.even[1][3]) (DP)" : "?"
+        "$kind in a leaf of size $(round(c.rect[2] - c.rect[1], sigdigits=2)), centre off by " *
+        "$(round(hypot((center(c) .- (p.x, p.y))...), sigdigits=2)), λ ≈ $(round(isempty(c.swaps) ? c.even[1][1] : c.swaps[1][1], digits=3))"
+    end
+    println("planted ", rpad(p.kind, 4), " at (", p.x, ", ", round(p.y, digits=4), "): ", found)
+end
+println("leaves not at a planted point: ", count(!, used))
+
+rect_poly(r) = Point2f[(r[1], r[3]), (r[2], r[3]), (r[2], r[4]), (r[1], r[4])]
+fig = Figure(size=(620, 640))
+ax = Axis(fig[1, 1]; xlabel="x", ylabel="y", title="39 × 39 scan by tracking (one diagonalisation)", aspect=DataAspect(), limits=((0, 1), (0, 1)))
+for c ∈ tcells
+    col = !isempty(c.swaps) ? :red : !isempty(c.even) ? :orange : c.cycles > 0 ? :magenta : c.nbad > 0 ? (:gray, 0.6) : nothing
+    col === nothing || poly!(ax, rect_poly(c.rect); color=col)
+end
+for l ∈ lines
+    a, b, cc = l.coeffs
+    lines!(ax, [0, 1], [-cc/b, -(a + cc)/b]; color=:white, linestyle=(l.kind == :real_EP2 ? :solid : :dash))
+end
+scatter!(ax, [p.x for p ∈ pts], [p.y for p ∈ pts]; marker=[p.kind == :EP2 ? :star5 : :circle for p ∈ pts],
+    markersize=12, color=:transparent, strokecolor=:white, strokewidth=1.5)
+Legend(fig[2, 1], [PolyElement(color=:red), PolyElement(color=:orange), PolyElement(color=:magenta), PolyElement(color=(:gray, 0.6))],
+    ["swap (odd number of EP2)", "identity, nonzero winding", "cycle of ≥ 3", "flagged labels"]; orientation=:horizontal, tellheight=true)
+fig
+
+
+#%% Mock Liouvillian: eigenvalue trajectories around loops enclosing one or several singularities
+
+# Needs the mock check cell (mock, mock_at, pts, lines). Each loop starts at its rightmost point (u = 0) and runs
+# counterclockwise. For every dimer block with a planted point inside the loop, its pair of coherence eigenvalues
+# (near λ = -γ0 - iω0) is tracked once around the loop, starting from one diagonalisation at u = 0, and shown as
+# ω - ω̄ = i(λ - λ̄), λ̄ = the pair's mean at u = 0 (in the title): filled circle at u = 0, arrowheads at u = 1/4, 1/2, 3/4, open circle at u = 1. A swap shows as each branch
+# ending on the other's start; a DP or a pair of EP2 as both branches returning, after winding around each other (then both run along the
+# same curve, branch 2 dashed).
+A_lp = AffineLiouvillian(δ -> mock_matrix(mock_at(δ)), 2)
+ep_w = filter(p -> p.block == 2, pts)                 # the EP2 pair 0.2 apart
+ep_n = filter(p -> p.block == 1, pts)                 # the EP2 pair 1e-3 apart
+dp = only(filter(p -> p.kind == :DP, pts))
+mid(ps) = P2(sum(p.x for p ∈ ps)/length(ps), sum(p.y for p ∈ ps)/length(ps))
+mock_loops = [
+    ("one EP2",                         Circle(P2(ep_w[1].x, ep_w[1].y), 0.05)),
+    ("two EP2, 0.2 apart",              Circle(mid(ep_w), 0.15)),
+    ("one EP2 of the close pair",       Circle(P2(ep_n[1].x, ep_n[1].y), 3e-4)),
+    ("two EP2, 1e-3 apart",             Circle(mid(ep_n), 0.02)),
+    ("DP",                              Circle(P2(dp.x, dp.y), 0.05)),
+    ("close pair + one EP2 + DP",       Polygon([P2(0.85, 0.2), P2(0.85, 0.68), P2(0.22, 0.68), P2(0.22, 0.2)])),
+]
+encloses(q::Circle, p) = hypot(p.x - q.center[1], p.y - q.center[2]) < q.ρ
+encloses(q::Polygon, p) = (v = q.vertices; minimum(first, v) < p.x < maximum(first, v) && minimum(last, v) < p.y < maximum(last, v))
+us = range(0, 1, 801)
+n_col = 1 + maximum(length(unique(p.block for p ∈ pts if encloses(q, p))) for (_, q) ∈ mock_loops)
+
+fig = Figure(size=(330*n_col, 300*length(mock_loops)))
+for (row, (name, q)) ∈ enumerate(mock_loops)
+    inner = filter(p -> encloses(q, p), pts)
+    ax_p = Axis(fig[row, 1]; xlabel="x", ylabel="y", title=name, aspect=DataAspect(), xticks=WilkinsonTicks(3))
+    δs = position.(Ref(q), us)
+    lines!(ax_p, first.(δs), last.(δs); color=:gray70)
+    scatter!(ax_p, [position(q, 0.)[1]], [position(q, 0.)[2]]; color=:gray70, markersize=8)
+    near = q isa Circle ? filter(p -> hypot(p.x - q.center[1], p.y - q.center[2]) < 3q.ρ, pts) : pts
+    scatter!(ax_p, [p.x for p ∈ near], [p.y for p ∈ near]; marker=[p.kind == :EP2 ? :star5 : :circle for p ∈ near],
+        markersize=11, color=[p ∈ inner ? :red : :transparent for p ∈ near], strokecolor=:white, strokewidth=1)
+    q isa Polygon && limits!(ax_p, 0, 1, 0, 1)
+
+    F = eigen(Matrix(A_lp(position(q, 0.))))           # one diagonalisation per loop, at u = 0
+    println(name)
+    for (col, k) ∈ enumerate(unique(p.block for p ∈ inner))
+        λp = first(filter(p -> p.block == k, inner)).λ
+        idx = partialsortperm(abs.(F.values .- λp), 1:2)
+        ω̄ = im*sum(F.values[idx])/2
+        local ax = Axis(fig[row, col + 1]; xlabel="Re (ω - ω̄)", ylabel="Im (ω - ω̄)", xticks=WilkinsonTicks(4),
+            title="block $k (" * join(string.(unique(p.kind for p ∈ inner if p.block == k)), ", ") *
+                  "), ω̄ = $(round(ω̄, digits=3))")
+        for (j, i) ∈ enumerate(idx)
+            t = @elapsed sol, diag = track(A_lp, q, F.values[i], F.vectors[:, i])
+            ω = [im*sol(u)[end] - ω̄ for u ∈ us]
+            lands = argmin(abs.(F.values[idx] .- sol.u[end][end]))
+            println("  block $k, branch $j → branch $lands  (|λ(1) - λ_start| = ",
+                round(abs(sol.u[end][end] - F.values[idx[lands]]), sigdigits=2), ", ", sol.stats.naccept, " steps, ",
+                round(t, digits=2), " s)")
+            lines!(ax, real(ω), imag(ω); color=Makie.wong_colors()[j], linestyle=(j == 1 ? :solid : :dash), label="branch $j" * (lands == j ? " (returns)" : " → $lands"))
+            scatter!(ax, [real(ω[1])], [imag(ω[1])]; color=Makie.wong_colors()[j], markersize=10)
+            scatter!(ax, [real(ω[end])], [imag(ω[end])]; color=:transparent, strokecolor=Makie.wong_colors()[j], strokewidth=1.5, markersize=16)
+            for u ∈ (0.25, 0.5, 0.75)
+                m = searchsortedfirst(us, u)
+                d = ω[m + 1] - ω[m - 1]
+                scatter!(ax, [real(ω[m])], [imag(ω[m])]; marker=:rtriangle, rotation=angle(d), color=Makie.wong_colors()[j], markersize=11)
+            end
+        end
+        axislegend(ax; position=:rt, labelsize=9, framevisible=false)
+    end
+end
+save("figures/mock_loop_trajectories.png", fig)
+fig
+
+
+#%% Mock Liouvillian: robustness of the tracking scan on randomly placed features
+
+# Needs the generic cells only. Each instance moves every feature of the mock: a weak EP2 pair (5e-4 to 2e-3 apart), a
+# second EP2 pair (0.1 to 0.4 apart, one point may fall outside the square), an off-axis DP, a real-axis EP line and a
+# DP line, at random positions and slopes. Constraints: rates positive on [0, 1]², the dimers' frequency bands separated
+# (no unplanted crossing between blocks), the driven qubit's Ω > 0 (a single EP line), distinct constant real parts.
+# Each instance: one diagonalisation at (0, 0), tracking scan on 39 × 39, 7 refinement levels, compared with the planted
+# points inside the square. Figures in figures/.
+using Random
+
+function random_mock_blocks(rng)
+    u(a, b) = a + (b - a)*rand(rng)
+    ωs = shuffle(rng, [0.8, 1.25, 1.7])                  # bands ω0 ± 0.16 never overlap
+    function dimer(ω0, sep)                             # EP2 pair at (x0, y0 ± sep/2); sep = 0: DP at (x0, y0)
+        x0, y0, γ0 = u(0.1, 0.9), u(0.1, 0.9), u(0.08, 0.2)
+        s = min(0.12, 0.9γ0/max(y0, 1 - y0))            # γa, γb = γ0 ± s(y - y0) > 0 on the square
+        return DimerBlock((x0, y0), s, ω0, γ0, sep*s)
+    end
+    # a random line a x + b y + c = 0 through a point of [0.2, 0.8]²
+    function line()
+        θ, px, py = u(0, π), u(0.2, 0.8), u(0.2, 0.8)
+        return cos(θ), sin(θ), -(cos(θ)*px + sin(θ)*py)
+    end
+    a, b, c = line()
+    γq = (u(0.1, 0.15), u(0, 0.1), u(0, 0.1))           # driven qubit decay, γ ≥ 0.1
+    κ = u(0.01, 0.016)                                   # Ω = γ/4 + κ (a x + b y + c) > 0: EP line where Ω = γ/4
+    Ω = (γq[1]/4 + κ*c, γq[2]/4 + κ*a, γq[3]/4 + κ*b)
+    ad, bd, cd = line()
+    κd = u(0.2, 0.28)                                    # detuning |Δ| ≤ 0.4, below the dimers' bands
+    return MockBlock[dimer(ωs[1], exp(u(log(5e-4), log(2e-3)))), dimer(ωs[2], u(0.1, 0.4)), dimer(ωs[3], 0.0),
+                     DrivenQubit(Ω, γq), DetunedQubit((κd*cd, κd*ad, κd*bd), 0.8)]
+end
+
+seeds = 1:8
+xs = ys = range(0, 1, 39)
+mkpath("figures")
+rect_poly(r) = Point2f[(r[1], r[3]), (r[2], r[3]), (r[2], r[4]), (r[1], r[4])]
+inside(c, p) = c.rect[1] ≤ p.x ≤ c.rect[2] && c.rect[3] ≤ p.y ≤ c.rect[4]
+crossed(c, l) = (f = [l.coeffs[1]*x + l.coeffs[2]*y + l.coeffs[3] for x ∈ c.rect[1:2] for y ∈ c.rect[3:4]]; minimum(f) ≤ 1e-12 && maximum(f) ≥ -1e-12)
+summary = NamedTuple[]
+overview = Figure(size=(1600, 820))
+for (n, seed) ∈ enumerate(seeds)
+    m = mockLiouvillian(blocks=random_mock_blocks(MersenneTwister(seed)))
+    A = AffineLiouvillian(δ -> mock_matrix(setproperties(m, (x=δ[1], y=δ[2]))), 2)
+    F = eigen(Matrix(A(P2(0, 0))))                       # the only diagonalisation
+    start = [(F.values[k], F.vectors[:, k]) for k ∈ findall(λ -> imag(λ) > 1e-8, F.values)]
+    t = @elapsed begin
+        cells = tracked_scan(A, xs, ys, start)
+        leaves = refine_tracked(A, cells, 7)
+    end
+    pts, lns = mock_singularities(m)
+    pts = filter(p -> 0 < p.x < 1 && 0 < p.y < 1, pts)
+    verdict(p) = (k = findfirst(c -> inside(c, p), leaves);
+                  k === nothing ? :missed : !isempty(leaves[k].swaps) ? :EP2 : !isempty(leaves[k].even) ? :DP : :unclear)
+    found = [verdict(p) for p ∈ pts]
+    correct = count(i -> found[i] == pts[i].kind, eachindex(pts))
+    spurious = count(c -> !any(p -> inside(c, p), pts), leaves)
+    badcells = filter(c -> c.nbad > 0, cells)
+    off_line = count(c -> !any(l -> l.kind == :real_EP2 && crossed(c, l), lns), badcells)
+    push!(summary, (seed=seed, planted=length(pts), correct=correct, spurious=spurious, flagged=length(badcells),
+                    flagged_off_EP_line=off_line, window=length(start), time=t))
+    println("seed $seed: window $(length(start)), planted inside $(length(pts)), correct $correct, spurious leaves $spurious, ",
+        "cells with flagged labels $(length(badcells)) ($(off_line) not on the EP line), $(round(t, digits=1)) s",
+        correct < length(pts) ? "   ← " * join(["$(p.kind) at ($(round(p.x, digits=4)), $(round(p.y, digits=4))) found as $(f)" for (p, f) ∈ zip(pts, found) if f != p.kind], "; ") : "")
+
+    fig = Figure(size=(620, 640))
+    for (f, pos) ∈ ((fig, fig[1, 1]), (overview, overview[fldmod1(n, 4)...]))
+        ax = Axis(pos; title="seed $seed", aspect=DataAspect(), limits=((0, 1), (0, 1)),
+            xlabel=(f === fig ? "x" : ""), ylabel=(f === fig ? "y" : ""))
+        for c ∈ cells
+            col = !isempty(c.swaps) ? :red : !isempty(c.even) ? :orange : c.cycles > 0 ? :magenta : c.nbad > 0 ? (:gray, 0.6) : nothing
+            col === nothing || poly!(ax, rect_poly(c.rect); color=col)
+        end
+        for l ∈ lns
+            a, b, cc = l.coeffs
+            xx = abs(b) > abs(a) ? [0.0, 1.0] : [-(cc + b*0)/a, -(cc + b)/a]
+            yy = abs(b) > abs(a) ? [-cc/b, -(a + cc)/b] : [0.0, 1.0]
+            lines!(ax, xx, yy; color=:white, linestyle=(l.kind == :real_EP2 ? :solid : :dash))
+        end
+        scatter!(ax, [p.x for p ∈ pts], [p.y for p ∈ pts]; marker=[p.kind == :EP2 ? :star5 : :circle for p ∈ pts],
+            markersize=(f === fig ? 12 : 9), color=:transparent, strokecolor=:white, strokewidth=1.2)
+    end
+    save("figures/mock_tracked_scan_seed$(seed).png", fig)
+end
+Legend(overview[3, 1:4], [PolyElement(color=:red), PolyElement(color=:orange), PolyElement(color=:magenta), PolyElement(color=(:gray, 0.6)),
+        LineElement(color=:white), LineElement(color=:white, linestyle=:dash),
+        MarkerElement(marker=:star5, color=:transparent, strokecolor=:white, strokewidth=1.2),
+        MarkerElement(marker=:circle, color=:transparent, strokecolor=:white, strokewidth=1.2)],
+    ["swap", "identity, winding ±2", "cycle of ≥ 3", "flagged labels", "real-axis EP line", "DP line", "planted EP2", "planted DP"];
+    orientation=:horizontal, tellheight=true)
+save("figures/mock_tracked_scan_robustness.png", overview)
+println("total: ", sum(r.correct for r ∈ summary), " / ", sum(r.planted for r ∈ summary), " planted points correctly found, ",
+    sum(r.spurious for r ∈ summary), " spurious leaves, ", sum(r.flagged_off_EP_line for r ∈ summary), " flagged cells off the EP line")
+overview
 
 
 #%% Monodromy, coupled bosons: tracking the Liouvillian modes around the EP (Lindblad, RWA_env)

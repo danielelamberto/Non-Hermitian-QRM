@@ -1,8 +1,8 @@
 # This file is machine-generated - editing it directly is not advised
 
-julia_version = "1.13.0"
+julia_version = "1.13.1"
 manifest_format = "2.1"
-project_hash = "e206061614bf6b2f032317a153c68fe0b26538e4"
+project_hash = "fcdba18b84b98d2b900d1cfff9d7508617827e9e"
 
 [[deps.ADTypes]]
 deps = ["PrecompileTools"]
@@ -1336,7 +1336,7 @@ version = "1.9.1+0"
 [[deps.LibSSH2_jll]]
 deps = ["Artifacts", "CompilerSupportLibraries_jll", "Libdl", "OpenSSL_jll", "Zlib_jll"]
 uuid = "29816b5a-b9ab-546f-933c-edad1886dfa8"
-version = "1.11.103+0"
+version = "1.11.104+0"
 
 [[deps.Libdl]]
 uuid = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
@@ -1560,7 +1560,7 @@ version = "0.24.14"
 
 [[deps.MakieStyles]]
 deps = ["CairoMakie", "Colors"]
-path = "/home/antino5/.julia/dev/MakieStyles"
+path = "/home/theo/.julia/dev/MakieStyles"
 uuid = "e9b806c7-48db-4c77-a19b-44cf5502317b"
 version = "0.1.0"
 

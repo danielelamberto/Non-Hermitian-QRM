@@ -11,8 +11,12 @@
   - Two real eigenvalues merging into a conjugate pair (critical damping, $Q = 1\/2$) is codimension 1 in real parameters: these EPs form lines, and a loop must use a complexified parameter, $L(s) = L_0 + s L_1$ with $s ∈ ℂ$.
   - Two complex, non-conjugate eigenvalues merging (the finite-frequency EP of the dimer) is codimension 2: these EPs are isolated points of a real two-parameter plane, and a loop in real parameters encircles them.
 
+  *Diabolic points.* At a DP the two eigenvalues meet without their eigenvectors merging, and $λ_+ - λ_-$ is linear in the distance rather than a square root: a loop around a DP gives no swap, like a loop around no singularity. The two are told apart by the winding of the discriminant $D = (λ_a - λ_b)^2$ around the loop: $± 1$ for each EP2 (with its orientation), $± 2$ for a DP, $0$ for no singularity. An identity with winding $± 2$ is therefore a DP _or_ two EP2 of the same orientation; only a smaller loop, which separates the two EP2, tells them apart (see the systematic scan).
+
+  The code is the package `NonHermitianQRM` (`src/`): paths (`paths.jl`), affine Liouvillians (`affine.jl`), tracking of one eigenpair (`tracking.jl`), bisection (`bisection.jl`), systematic scan (`scan.jl`), and the mock Liouvillian used as a test bed (`mock.jl`). The notebooks are in `notebooks/` and the checks in `test/runtests.jl`.
+
   = Ingredients
-  *Paths.* A closed path in parameter space is given by `position(p, u)`, `velocity(p, u)` $= dif "position"\/dif u$ for $u ∈ [0, 1]$, and the `breakpoints` where the velocity jumps (the corners of a `Polygon`), passed to the ODE solver as `tstops`. For the dimer, the plane is $(δ ω, δ γ)$ with $ω_(a,b) = ω_0 ± δ ω$, $γ_(a,b) = γ_0 ± δ γ$, written as a function δ ↦ model with `setproperties` where the loop is defined.
+  *Paths.* A path in parameter space is given by `position(p, u)`, `velocity(p, u)` $= dif "position"\/dif u$ for $u ∈ [0, 1]$, and the `breakpoints` where the velocity jumps (the corners of a `Polygon`), passed to the ODE solver as `tstops`. Loops are `Circle`s and `Polygon`s; open `Segment`s are the edges of the bisection and of the scan. For the dimer, the plane is $(δ ω, δ γ)$ with $ω_(a,b) = ω_0 ± δ ω$, $γ_(a,b) = γ_0 ± δ γ$, written as a function δ ↦ model with `setproperties` where the loop is defined.
 
   *Affine Liouvillian.* The Lindblad Liouvillian is linear in the frequencies and the rates, so along the path
   $
@@ -20,9 +24,9 @@
     L'(u) &= δ ω'(u) L_ω + δ γ'(u) L_γ,
   $
   where primes denote derivatives in $u$,
-  with $L_ω = -i[hat(a)^† hat(a) - hat(b)^† hat(b), dot]$ and $L_γ = 2(1 + n_B)(cal(D)[hat(a)] - cal(D)[hat(b)]) + 2 n_B (cal(D)[hat(a)^†] - cal(D)[hat(b)^†])$ (`AffineLiouvillian`, built from any function δ ↦ L(δ) by $L_k = (L(h e_k) - L_0)\/h$, with a check that the family is affine). Nothing is rebuilt along the path; only sparse sums are evaluated.
+  with $L_ω = -i[hat(a)^† hat(a) - hat(b)^† hat(b), dot]$ and $L_γ = 2(1 + n_B)(cal(D)[hat(a)] - cal(D)[hat(b)]) + 2 n_B (cal(D)[hat(a)^†] - cal(D)[hat(b)^†])$. `AffineLiouvillian` builds this decomposition from any function δ ↦ L(δ), by $L_k = (L(h e_k) - L_0)\/h$. It checks that the family is affine by comparing $L$ with the decomposition at $δ = 2h(1, …, 1)$, a point not used to build it: at $h(1, …, 1)$ a pure $δ_k^2$ term would be reproduced exactly, and with one parameter the check could never fail. All terms are stored on one sparsity pattern (the union of theirs and the diagonal), so that $L(u)$ and $L'(u)$ are written in place by combining the stored values (`evaluate!`, `derivative!`): nothing is allocated or rebuilt along the path.
 
-  *Starting point.* At $u = 0$ the eigenpairs $(λ, r)$ nearest to target values (here $-i ω$ from the roots of `disc`) are obtained by shift-invert (`eigenpairs_near`).
+  *Starting point.* At $u = 0$ the eigenpairs $(λ, r)$ nearest to target values (for the dimer, $-i ω$ from the roots of `disc`) are obtained by shift-invert (`eigenpairs_near`; `pair_near` for a close pair, from a single shift). The systematic scan starts instead from one dense diagonalisation.
 
   = Tracking equations
   An eigenpair is defined only up to the scale and phase of $r$. They are fixed by a normalisation $c^† r = 1$ with a fixed vector $c$, initially $c = r_0 \/ (r_0^† r_0)$. The eigenpair then solves the $N + 1$ equations
@@ -41,7 +45,7 @@
   $
   (`tangent`). This ODE for $[r; λ]$ is integrated over $u ∈ [0, 1]$ with an adaptive solver (`track`, Vern7, tolerances $10^(-10)$, $10^(-12)$). As a check, $λ' = (l^† L' r)\/(l^† r)$ from first-order perturbation theory, with $l$ the left eigenvector.
 
-  *Corrector.* After each accepted step, Newton iterations at fixed $u$ pull the state back onto an exact eigenpair (`correct`):
+  *Corrector.* After each accepted step, Newton iterations at fixed $u$ pull the state back onto an exact eigenpair (`correct!`):
   $
     B vec(δ r, δ λ) = vec(-(L - λ) r, 1 - c^† r),
   $
@@ -52,32 +56,81 @@
 
   *Detection.* After one loop, $λ(1)$ is compared with the eigenvalues at $u = 0$: landing on the other one means a swap.
 
-  = Linear solves: stale LU and refinement
-  $B$ depends on $(u, λ, r)$ and must be solved at every right-hand-side evaluation (7 to 16 per step) and every Newton iteration. A sparse LU of $B$ dominated the cost (3–4 ms out of 4 ms for $N = 625$). Since $B$ changes little along the path, the factorisation $F$ of an earlier $B_"old"$ is reused, and the solution of $B x = b$ is refined (`StaleLU`, `solve_bordered!`):
+  = Linear solves
+  *Stale LU and refinement.* $B$ depends on $(u, λ, r)$ and must be solved at every right-hand-side evaluation (7 to 16 per step) and every Newton iteration. A sparse LU of $B$ dominates the cost. Since $B$ changes little along the path, the factorisation $F$ of an earlier $B_"old"$ is reused, and the solution of $B x = b$ is refined (`StaleLU`, `solve_bordered!`):
   $
     x_0 = F \\ b, quad x_(k+1) = x_k + F \\ (b - B x_k),
   $
-  with $B x$ computed without assembling $B$. The error is multiplied by $I - B_"old"^(-1) B$ at each iteration, a factor $≈ 0.07$ over a typical step, at the cost of one sparse product and one triangular solve ($≈ 1\/50$ of a factorisation). The solver refactorises when refinement does not reach $‖b - B x‖ ≤ 10^(-12) ‖b‖$ within 20 iterations or stops decreasing, and after any solve that needed more than 8 iterations. Near an EP, $B_"old"^(-1)$ grows and refinement slows down; GMRES preconditioned by the same $F$ would be the more robust variant.
+  with $B x$ computed without assembling $B$. The error is multiplied by $I - B_"old"^(-1) B$ at each iteration, a factor $≈ 0.07$ over a typical step, at the cost of one sparse product and one triangular solve ($≈ 1\/50$ of a factorisation). The solver refactorises when refinement does not reach $‖b - B x‖ ≤ 10^(-12) ‖b‖$ within 20 iterations or stops decreasing, and after any solve that needed more than 8 iterations. Near an EP, $B_"old"^(-1)$ grows and refinement slows down; GMRES preconditioned by the same $F$ would be the more robust variant. The stale LU divides the tracking times by 2 to 5 compared with a fresh factorisation at every solve, with identical results.
 
-  = Validation
-  Dimer with `RWA_env`, $ω_0 = 1$, $γ_0 = 0.1$, $g = 0.01$, EPs at $(δ ω, δ γ) = (0, ± g\/2)$; $n_"Fock" = 5$ per mode, $N = 625$. Both modes are tracked and compared with $-i ω$ from `disc` along the whole loop:
+  *In-place assembly.* Each tracked eigenpair owns its `StaleLU`, which holds $B$ (a `BorderedPattern`, filled in place) and the work vectors, so that nothing is allocated per step; refactorisations on the same pattern reuse the symbolic analysis of the LU (`lu!`). The pattern of $B$ is that of $L$, bordered by $-r$ and $c^†$ _on their support only_, with no stored corner entry. This matters: the eigenvectors of a Liouvillian with a symmetry vanish exactly outside their sector, and stay so along a path, but a border storing those zeros (or a stored zero in the corner) increases the fill and pivoting of the LU, and made the factorisations 1.4 times slower for the 625-state dimer. The pattern is rebuilt if $r$ or $c$ ever leave the support. Time and allocations for one loop around one EP (one thread, best of five):
   #table(
     columns: 4,
     stroke: white,
-    [*Loop*], [*After one loop*], [*$max|λ - λ_"disc"|$*], [*Time*],
-    [circle around one EP], [swap], [$2.6 × 10^(-13)$], [1.6–1.9 s],
-    [rectangle around one EP], [swap], [$7 × 10^(-11)$], [2.7 s],
-    [circle around no EP], [no swap], [$9 × 10^(-14)$], [0.7 s],
-    [circle around both EPs], [no swap], [$7 × 10^(-14)$], [1.5 s],
-    [circle passing $10^(-4)$ from the EP], [swap], [$1.8 × 10^(-12)$], [0.7–1.0 s],
+    [*System*], [*$N$*], [*Before*], [*In place*],
+    [mock Liouvillian], [18], [11.0 ms, 29 MB], [5.7 ms, 4.4 MB],
+    [boson dimer, $n_"Fock" = 5$], [625], [1.05 s, 1.5 GB], [0.88 s, 0.45 GB],
+    [boson dimer, $n_"Fock" = 8$], [4096], [22.0 s, 14 GB], [19.9 s, 7.3 GB],
   )
-  The stale LU brought these times down by 2 to 5 compared with a fresh factorisation at every solve, with identical results.
+  For large $N$ the cost is now the numeric factorisation itself (70 % of the time for $N = 625$), which still allocates its factors (2.5 MB per LU for $N = 625$).
+
+  = Validation on the boson dimer
+  Dimer with `RWA_env`, $ω_0 = 1$, $γ_0 = 0.1$, $g = 0.01$, EPs at $(δ ω, δ γ) = (0, ± g\/2)$; $n_"Fock" = 5$ per mode, $N = 625$. Both modes are tracked and compared with $-i ω$ from `disc` along the whole loop:
+  #table(
+    columns: 3,
+    stroke: white,
+    [*Loop*], [*After one loop*], [*$max|λ - λ_"disc"|$*],
+    [circle around one EP], [swap], [$2.6 × 10^(-13)$],
+    [rectangle around one EP], [swap], [$7 × 10^(-11)$],
+    [circle around no EP], [no swap], [$9 × 10^(-14)$],
+    [circle around both EPs], [no swap], [$7 × 10^(-14)$],
+    [circle passing $10^(-4)$ from the EP], [swap], [$1.8 × 10^(-12)$],
+  )
+
+  = Locating an EP by bisection
+  From a rectangle that swaps the pair, `ep_bisect` splits it across its longer side, tracks both eigenvalues along the dividing line, and keeps the half that swaps (exactly one must). Every side of every rectangle lies on a tracked line (`TrackedLine`, one ODE solution per branch): following an eigenvalue along a side means picking the branch that matches it at the start (`transport`, which refuses an ambiguous match, closer than a quarter of the gap) and reading that branch at the end. Splitting a rectangle therefore costs one new line, the other sides being parts of earlier lines. A dividing line passing too close to the EP fails, and is moved by a tenth of the side.
+
+  *Driven optomechanics.* In the displaced frame of the linearised steady state ($n_"Fock" = 6$ per mode, $N = 1296$), in the plane $(Δ, F\/F_"EP")$ where $L$ is affine, a loop of radius 0.05 around the linearised EP swaps the pair. Sixteen bisection levels (20 tracked lines, 100 s) locate the EP of the full model at $Δ = -1.02196 ± 0.0002$, $F = 0.77247 ± 0.00015$, shifted by about 1 % from the linearised EP. Direct loops of twice the final box size confirm it (swap around the box, none next to it), and the gap of the pair at the box centres scales as $sqrt("box size")$.
+
+  = Systematic scan
+  Without a starting rectangle, a grid of the parameter plane is scanned (`tracked_scan`), and the cells whose loop shows a singularity are refined.
+
+  *One diagonalisation.* The spectrum is computed once, densely, at the lower-left node, and a window of eigenvalues is kept (for the mock below, those with $"Im" λ > 0$, one of each conjugate pair). Each of them is then followed along every grid edge by `track`: no other diagonalisation. The tracks of different eigenpairs, and of different edges, are independent and run in parallel.
+
+  *Labels.* The eigenpairs of the window are labels $1 … n$. They are carried to every node along a spanning tree of the grid (the bottom row, then every column upwards), so tree edges map labels to themselves. Every other (horizontal) edge is tracked from its left node, and the eigenvalues at its end are matched to the labels of its right node (`match_labels`, relative tolerance $10^(-7)$). A tracked eigenvalue that lands on none of the labels is _lost_: an EP with an eigenvalue outside the window, or a failed integration. The cells around it say nothing about that label.
+
+  *Monodromy of a cell.* Around a cell, counterclockwise from its lower-left corner, the four edges compose into a permutation $σ$ of the labels (`cell_permutation`): along the bottom edge label $a$ reaches label $b$ of the lower-right corner, carried up the right edge (a tree edge); the label of the upper-left corner whose top edge ends on $b$ is $σ(a)$, carried down the left edge. A transposition $(a b)$ means an odd number of EP2 of that pair inside the cell. For a pair returning to itself, the winding of $D = (λ_a - λ_b)^2$ is the sum of its arg increments along the four edges (`cell_winding`). Along one edge, both eigenvalues are interpolated linearly between the union of their solver steps, so that $d = λ_a - λ_b$ moves on straight segments, whose change of arg seen from 0 is exactly $"angle"(d_1\/d_0) ∈ (-π, π)$; the change for $D$ is twice the sum (`arg_increment`). Taking $"angle"(D_1\/D_0)$ instead aliases when one step turns $D$ by more than $π$, which happened when the solver crossed the neighbourhood of a DP in one step. Each cell gives a `ScanCell`: its swaps, its pairs with a nonzero winding, the number of labels in longer cycles (EPs involving three eigenvalues or more), and the number of lost labels.
+
+  *Refinement.* The flagged cells (a swap, a nonzero winding or a longer cycle) are split into $2 × 2$ sub-cells, scanned from the eigenpairs carried to their corner, recursively (`refine_tracked`, flagged cells in parallel). An EP2 stays a swap at every level; two EP2 in one cell (identity, winding $± 2$) separate into two swapping sub-cells; a DP stays an identity with winding $± 2$.
+
+  = Test bed: the mock Liouvillian
+  To test the scan where the answer is known exactly, `MockLiouvillian` is a direct sum of small independent Lindblad blocks, each with frequencies and rates affine in $(x, y) ∈ [0, 1]^2$, so that $L$ is affine and its spectrum known in closed form:
+  - `DimerBlock`: the single-excitation sector of two coupled damped modes, $ω_(a,b) = ω_0 ± s(x - x_0)$, $γ_(a,b) = γ_0 ± s(y - y_0)$, coupling $g\/2$. Its coherences have a pair of EP2 at $(x_0, y_0 ± g\/2s)$, or a DP at $(x_0, y_0)$ if $g = 0$.
+  - `DrivenQubit`: resonant drive and decay, a line of real-axis EP2 where $Ω = γ\/4$.
+  - `DetunedQubit`: the pair $-γ\/2 ± i Δ$ touches the real axis on the line $Δ = 0$ without coalescing (a DP line).
+  Coherences between different blocks are degenerate everywhere, so $L$ is restricted to a sector: the coherences of each block (18 states, default), or all elements within each block (35 states). The default instance has a pair of EP2 $10^(-3)$ apart, a pair $0.2$ apart, an off-axis DP, a real-axis EP2 line and a DP line, at generic (non-round) positions so that nothing falls on the nodes of regular or refined grids.
+
+  *Scan of the default instance.* Window of 7 eigenvalues, $39 × 39$ grid and 7 refinement levels (cells of $2 × 10^(-4)$): each of the four EP2 is found as a swap and the DP as an identity with winding $2$, in leaves within $10^(-4)$ of the planted points, with no other leaf and no lost label (1.3 s for the grid, 0.9 s for the refinement, 12 threads).
+
+  *Loops around several singularities.* Around one EP2 each eigenvalue covers half a closed curve and ends on the other's start. Around two EP2 of the same pair ($0.2$ or $10^(-3)$ apart), both eigenvalues return after one full turn around each other, exactly as around the DP: from a loop much larger than their separation, two EP2 and a DP cannot be told apart, since $sqrt((δ - a)(δ + a)) ≈ δ$. Around a rectangle enclosing the close pair, one EP2 of the other pair and the DP, each block behaves independently (identity, swap, identity), and the monodromy of the whole window is a single transposition.
+
+  *Robustness.* Eight random instances, every feature moved (positions, separations, slopes of the lines), with the rates kept positive and the blocks' frequency bands separated: all 39 planted points inside the square were found with the right type, with no spurious leaf and no lost label (1.6 s per instance).
+
+  *Limitations.*
+  - With a window of the upper half-plane, the real-axis EP2 lines are not tested: their two eigenvalues are conjugate, so at most one is tracked, and crossing the line moves it onto the real axis without a visible event. Testing them requires the conjugate eigenvalues in the window.
+  - An identity with winding $± 2$ that survives all refinement levels is a DP, or two EP2 closer than the finest cell. The dimension of the kernel of $L - λ$ at the leaf (one for an EP2, two for a DP) would decide.
+  - An EP3 has codimension 4 in real parameters: a two-parameter plane generically misses it. What appears instead are two EP2 sharing an eigenvalue ($λ_1 ↔ λ_2$ and $λ_2 ↔ λ_3$): a cell containing both shows a 3-cycle, separated into two swaps by refinement. No mock block has three coupled modes yet.
+
+  = Relation to the discriminant method
+  The coworker's `ep_search` (`functions_QRM.jl`) looks for zeros of the discriminant over a window of eigenvalues in a real (Hermitian-operator) basis, localises them by Newton, and classifies them (`check_ep`) by the exponent of the gap ($1\/2$ for an EP2, $1$ for a DP) and by the slope of the off-diagonal element $t$ of a $2 × 2$ Schur compression of the pair (0 for an EP2, 1 for a DP). On the mock it finds the four off-axis EP2 to $10^(-15)$, the real-axis EP2 line, and the DP to $1.4 × 10^(-12)$, but classifies the DP as inconclusive: there $t ≡ 0$ (the DP is normal), and the slope of $t$ is undefined. Normal DPs, and unresolved EP2 pairs, can explain inconclusive verdicts. The two methods are complementary: monodromy detects singularities through closed loops without landing on them, and cannot mistake a DP for an EP2; the discriminant method lands on them with high accuracy.
 
   = Next steps
-  - Allocation-free refinement (preallocated buffers, `ldiv!`), lazy interpolation with `saveat`, parallel tasks over modes and loops.
+  - Kernel dimension at the leaves, to separate DPs from unresolved EP2 pairs.
+  - Conjugate eigenvalues in the window, to test the real-axis EP lines; complexified parameter for codimension-1 EPs (single boson at $Q = 1\/2$).
+  - A mock block with three coupled modes, to test the cycles.
   - Non-affine Liouvillians (Bloch–Redfield without `RWA_env`), for which $L'$ needs finite differences.
-  - Complexified parameter $s$ for codimension-1 EPs (single boson at $Q = 1\/2$).
-  - Locating the EP, by Newton on the augmented system $(L - λ) r = 0$, $(L - λ)^† l = 0$, $l^† r = 0$, or by following $"cond"(B)$.
+  - Parallel tracking of the branches in the bisection; a solver that refactorises in place (KLU) for large $N$.
+  - The loops of the scan applied to the QRM points that the discriminant method leaves inconclusive.
 
 ]
 
@@ -85,7 +138,7 @@
 #let (template, cetz-style, byz) = setup(theme:"auto")
 #show: template.with(
   title: [Monodromy tracking of Liouvillian eigenvalues],
-  abstract: [How exceptional points of a Liouvillian are detected by following eigenpairs around closed loops in parameter space: path parametrisation, bordered predictor–corrector equations, normalisation resets, stale-LU linear solves, and the validation on the boson dimer.]
+  abstract: [How exceptional points of a Liouvillian are detected by following eigenpairs around closed loops in parameter space: bordered predictor–corrector equations with in-place stale-LU solves, localisation by bisection, a systematic scan of a grid with windings and refinement, and its validation on the boson dimer, on driven optomechanics, and on a mock Liouvillian with planted singularities.]
 )
 
 #main(colors: byz, cetz-style:cetz-style)

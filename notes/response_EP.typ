@@ -10,7 +10,7 @@
     hat(H)_"int" = g/2 (hat(a) + hat(a)^†)(hat(b) + hat(b)^†) = g hat(x)_a hat(x)_b,
   $
   where $hat(x) = (hat(a) + hat(a)^†)\/√2$.
-  Each mode couples to its own Ohmic bath through $hat(x)$, with spectral density normalised so that the local Lindblad jump operator is $√(2γ) hat(a)$. Two approximations can be switched on independently (the `Approximation` enum in `resp_functions.jl`):
+  Each mode couples to its own Ohmic bath through $hat(x)$, with spectral density normalised so that the local Lindblad jump operator is $√(2γ) hat(a)$. Two approximations can be switched on independently (the `Approximation` enum in `src/models.jl`):
   - `RWA_env`: rotating-wave (secular) approximation on the system–bath coupling;
   - `RWA_coupling`: rotating-wave approximation on the coupling, $g/2 (hat(a)^† hat(b) + hat(b)^† hat(a))$.
 

@@ -2,8 +2,9 @@
     NonHermitianQRM
 
 Tools to find exceptional points (EPs) of Liouvillians.
-- Models and their analytical response (`models.jl`), master equations (`master_equations.jl`), and a mock Liouvillian
-  with planted, exactly known singularities as a test bed (`mock.jl`).
+- Models and their analytical response (`models.jl`), master equations (`master_equations.jl`), a mock Liouvillian
+  with planted, exactly known singularities as a test bed (`mock.jl`), and the quantum Rabi model with its
+  Jaynes–Cummings limit (`qrm.jl`).
 - Monodromy: eigenpairs followed continuously around loops in a two-parameter plane swap when the loop encloses an EP.
   Paths (`paths.jl`), Liouvillians affine in the parameters (`affine.jl`), predictor–corrector tracking of one
   eigenpair (`tracking.jl`), localisation of one EP by bisection (`bisection.jl`), and a systematic scan of a grid
@@ -26,6 +27,7 @@ import Polynomials: derivative        # derivative(A::AffineLiouvillian, v): met
 include("models.jl")
 include("master_equations.jl")
 include("mock.jl")
+include("qrm.jl")
 include("paths.jl")
 include("affine.jl")
 include("tracking.jl")
@@ -41,6 +43,8 @@ export Hamiltonian, Lindbladian, DressedLiouvillian, Redfield, modes, dressed_mo
 # mock.jl
 export MockBlock, DimerBlock, DrivenQubit, DetunedQubit, MockLiouvillian, default_mock_blocks, block_spectrum,
        mock_sector, mock_matrix, mock_spectrum, mock_singularities
+# qrm.jl
+export QRM, qrm_operators, excitation_sector, jc_effective_energies, jc_spectrum, jc_EP
 # paths.jl, affine.jl
 export P2, ParamPath, Circle, Polygon, Segment, velocity, breakpoints, AffineLiouvillian, evaluate!, derivative,
        derivative!
@@ -49,6 +53,6 @@ export Eigenpair, eigenpairs_near, pair_near, normalisation, StaleLU, tangent, c
 # bisection.jl
 export TrackedLine, branch, track_line, pair_midpoint, rect_swaps, ep_bisect
 # scan.jl
-export Label, TrackedEdge, TrackedGrid, ScanCell, flagged, track_edge, track_grid, tracked_scan, refine_tracked
+export NodeLabel, TrackedEdge, TrackedGrid, ScanCell, flagged, track_edge, track_grid, tracked_scan, refine_tracked
 
 end

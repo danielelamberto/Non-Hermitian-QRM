@@ -16,11 +16,11 @@
 # cells around it say nothing about that label.
 
 """
-    Label
+    NodeLabel
 
 The eigenpair carrying a label at a grid node, or `nothing` if the label was lost on the way there.
 """
-const Label = Union{Nothing,Eigenpair}
+const NodeLabel = Union{Nothing,Eigenpair}
 
 """
     TrackedEdge
@@ -31,7 +31,7 @@ the tracking failed), the eigenvalue `λ` at those steps, and the final eigenpai
 struct TrackedEdge
     t::Vector{Vector{Float64}}
     λ::Vector{Vector{ComplexF64}}
-    ends::Vector{Label}
+    ends::Vector{NodeLabel}
 end
 
 """
@@ -44,7 +44,7 @@ function track_edge(A, a::P2, b::P2, pairs; threaded=false, kwargs...)
     n = length(pairs)
     t = [Float64[] for _ ∈ 1:n]
     λ = [ComplexF64[] for _ ∈ 1:n]
-    ends = Vector{Label}(nothing, n)
+    ends = Vector{NodeLabel}(nothing, n)
     function track_label(k)
         pairs[k] === nothing && return
         sol = try
@@ -105,7 +105,7 @@ All tracked edges of a grid `xs × ys`, with the labelled eigenpairs at every no
 struct TrackedGrid
     xs::Vector{Float64}
     ys::Vector{Float64}
-    nodes::Matrix{Vector{Label}}
+    nodes::Matrix{Vector{NodeLabel}}
     horizontal::Matrix{TrackedEdge}
     vertical::Matrix{TrackedEdge}
     to_right::Matrix{Vector{Int}}
@@ -120,8 +120,8 @@ spanning tree, which carries the labels to every node, then the other edges. `kw
 function track_grid(A, xs, ys, start_pairs; kwargs...)
     nx, ny = length(xs), length(ys)
     node(i, j) = P2(xs[i], ys[j])
-    nodes = Matrix{Vector{Label}}(undef, nx, ny)
-    nodes[1, 1] = Label[start_pairs...]
+    nodes = Matrix{Vector{NodeLabel}}(undef, nx, ny)
+    nodes[1, 1] = NodeLabel[start_pairs...]
     horizontal = Matrix{TrackedEdge}(undef, nx - 1, ny)
     vertical = Matrix{TrackedEdge}(undef, nx, ny - 1)
     for i ∈ 1:nx - 1                                     # tree, bottom row: in sequence, eigenpairs in parallel
@@ -199,7 +199,7 @@ struct ScanCell
     windings::Vector{Tuple{ComplexF64,ComplexF64,Int}}
     cycles::Int
     lost::Int
-    corner::Vector{Label}
+    corner::Vector{NodeLabel}
 end
 
 """

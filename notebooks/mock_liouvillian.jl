@@ -43,8 +43,8 @@ end
 verdict(c) = !isempty(c.swaps) ? :EP2 : !isempty(c.windings) ? :DP : :unclear
 
 # a cell drawn by its result: swap (red), nonzero winding (orange), longer cycle (magenta), lost labels (gray)
-cell_colour(c) = !isempty(c.swaps) ? :red : !isempty(c.windings) ? :orange : c.cycles > 0 ? :magenta :
-                 c.lost > 0 ? (:gray, 0.6) : nothing
+cell_colour(c) = !isempty(c.swaps) ? clrs[:byzantine] : !isempty(c.windings) ? clrs[:hesperides] : c.cycles > 0 ? clrs[:hyacinth] :
+                 c.lost > 0 ? (clrs[:overlay], 0.6) : nothing
 rect_poly(r) = Point2f[(r[1], r[3]), (r[2], r[3]), (r[2], r[4]), (r[1], r[4])]
 function draw_cells!(ax, cells)
     for c ∈ cells
@@ -58,16 +58,16 @@ function draw_planted!(ax, pts, plines; markersize=12)
     for l ∈ plines
         a, b, c = l.coeffs
         xx, yy = abs(b) > abs(a) ? ([0.0, 1.0], [-c/b, -(a + c)/b]) : ([-c/a, -(b + c)/a], [0.0, 1.0])
-        lines!(ax, xx, yy; color=:white, linestyle=(l.kind == :real_EP2 ? :solid : :dash))
+        lines!(ax, xx, yy; color=clrs[:text], linestyle=(l.kind == :real_EP2 ? :solid : :dash))
     end
     scatter!(ax, [p.x for p ∈ pts], [p.y for p ∈ pts]; marker=[p.kind == :EP2 ? :star5 : :circle for p ∈ pts],
-        markersize, color=:transparent, strokecolor=:white, strokewidth=1.2)
+        markersize, color=:transparent, strokecolor=clrs[:text], strokewidth=1.2)
 end
 scan_legend(pos) = Legend(pos,
-    [PolyElement(color=:red), PolyElement(color=:orange), PolyElement(color=:magenta), PolyElement(color=(:gray, 0.6)),
-     LineElement(color=:white), LineElement(color=:white, linestyle=:dash),
-     MarkerElement(marker=:star5, color=:transparent, strokecolor=:white, strokewidth=1.2),
-     MarkerElement(marker=:circle, color=:transparent, strokecolor=:white, strokewidth=1.2)],
+    [PolyElement(color=clrs[:byzantine]), PolyElement(color=clrs[:hesperides]), PolyElement(color=clrs[:hyacinth]), PolyElement(color=(clrs[:overlay], 0.6)),
+     LineElement(color=clrs[:text]), LineElement(color=clrs[:text], linestyle=:dash),
+     MarkerElement(marker=:star5, color=:transparent, strokecolor=clrs[:text], strokewidth=1.2),
+     MarkerElement(marker=:circle, color=:transparent, strokecolor=clrs[:text], strokewidth=1.2)],
     ["swap", "identity, nonzero winding", "cycle of ≥ 3", "lost labels", "real-axis EP2 line", "DP line", "planted EP2",
      "planted DP"]; orientation=:horizontal, nbanks=2, tellheight=true)
 
@@ -123,7 +123,7 @@ gapmap = [begin
 fig = Figure(size=(760, 700))
 ax = Axis(fig[1, 1]; xlabel="x", ylabel="y", title="mock Liouvillian (coherence sector): log₁₀ smallest gap",
     aspect=DataAspect(), limits=((0, 1), (0, 1)))
-hm = heatmap!(ax, xs, ys, log10.(gapmap); colormap=:viridis)
+hm = heatmap!(ax, xs, ys, log10.(gapmap); colormap=clrs[:byz])
 Colorbar(fig[1, 2], hm)
 draw_planted!(ax, pts, plines; markersize=14)
 fig
@@ -196,7 +196,7 @@ n_col = 1 + maximum(length(unique(p.block for p ∈ pts if encloses(q, p))) for 
 
 # one branch: its curve, start and end markers, and arrowheads showing the direction
 function draw_branch!(ax, ω, j, label)
-    col = Makie.wong_colors()[j]
+    col = (clrs[:byzantine], clrs[:selene])[j]
     lines!(ax, real(ω), imag(ω); color=col, linestyle=(j == 1 ? :solid : :dash), label)
     scatter!(ax, [real(ω[1])], [imag(ω[1])]; color=col, markersize=10)
     scatter!(ax, [real(ω[end])], [imag(ω[end])]; color=:transparent, strokecolor=col, strokewidth=1.5, markersize=16)
@@ -212,11 +212,11 @@ for (row, (name, q)) ∈ enumerate(mock_loops)
     inner = filter(p -> encloses(q, p), pts)
     ax_p = Axis(fig[row, 1]; xlabel="x", ylabel="y", title=name, aspect=DataAspect(), xticks=WilkinsonTicks(3))
     δs = position.(Ref(q), us)
-    lines!(ax_p, first.(δs), last.(δs); color=:gray70)
-    scatter!(ax_p, [position(q, 0.)[1]], [position(q, 0.)[2]]; color=:gray70, markersize=8)
+    lines!(ax_p, first.(δs), last.(δs); color=clrs[:overlay])
+    scatter!(ax_p, [position(q, 0.)[1]], [position(q, 0.)[2]]; color=clrs[:overlay], markersize=8)
     near = q isa Circle ? filter(p -> hypot(p.x - q.center[1], p.y - q.center[2]) < 3q.ρ, pts) : pts
     scatter!(ax_p, [p.x for p ∈ near], [p.y for p ∈ near]; marker=[p.kind == :EP2 ? :star5 : :circle for p ∈ near],
-        markersize=11, color=[p ∈ inner ? :red : :transparent for p ∈ near], strokecolor=:white, strokewidth=1)
+        markersize=11, color=[p ∈ inner ? RGBAf(clrs[:byzantine]) : RGBAf(0, 0, 0, 0) for p ∈ near], strokecolor=clrs[:text], strokewidth=1)
     q isa Polygon && limits!(ax_p, 0, 1, 0, 1)
 
     F = eigen(Matrix(A_mock(position(q, 0.))))         # one diagonalisation per loop, at u = 0

@@ -31,7 +31,7 @@ println("scan: ", length(gs)*length(γs), " points in ", round(t, digits=1), " s
 
 fig = Figure(size=(700, 550))
 ax = Axis(fig[1, 1]; xlabel="g", ylabel="γ", title="log₁₀ minimal gap, odd sector, 6 slowest eigenvalues")
-hm = heatmap!(ax, gs, γs, log10.(gap_map); colormap=:viridis)
+hm = heatmap!(ax, gs, γs, log10.(gap_map); colormap=clrs[:byz])
 Colorbar(fig[1, 2], hm)
 fig
 
@@ -65,14 +65,14 @@ println("scan: ", length(gs)*length(γs), " points × ", length(cutoffs), " cuto
 
 fig = Figure(size=(750, 550))
 ax = Axis(fig[1, 1]; xlabel="g", ylabel="γ", title="|Re ω| of the dominant ⟨a⟩ mode (Redfield, n_fock = $(cutoffs[end]))")
-hm = heatmap!(ax, gs, γs, half_gap; colormap=:viridis)
+hm = heatmap!(ax, gs, γs, half_gap; colormap=clrs[:byz])
 Colorbar(fig[1, 2], hm)
 # points where the two cutoffs disagree (crosses) or the sector is unstable (red)
-for (mask, marker, color) ∈ ((unconverged, :xcross, :white), (unstable, :circle, :red))
+for (mask, marker, color) ∈ ((unconverged, :xcross, clrs[:text]), (unstable, :circle, clrs[:byzantine]))
     bad = findall(mask)
     isempty(bad) || scatter!(ax, [gs[I[1]] for I ∈ bad], [γs[I[2]] for I ∈ bad]; marker, color, markersize=6)
 end
-scatter!(ax, [0.], [1.]; marker=:star5, color=:white, markersize=14)     # g = 0: critical damping γ = ω0
+scatter!(ax, [0.], [1.]; marker=:star5, color=clrs[:text], markersize=14)     # g = 0: critical damping γ = ω0
 fig
 
 
@@ -111,15 +111,15 @@ us = range(0, 1, 401)
 
 fig = Figure(size=(1100, 900))
 ax_p = Axis(fig[1, 1]; xlabel="Δ", ylabel="F / F_EP", title="loops in parameter space")
-scatter!(ax_p, [Δ_EP], [1.0]; marker=:star5, markersize=16, color=:white, label="linearised EP")
+scatter!(ax_p, [Δ_EP], [1.0]; marker=:star5, markersize=16, color=clrs[:text], label="linearised EP")
 for (j, (name, q)) ∈ enumerate(om_loops)
     δs = position.(Ref(q), us)
     lines!(ax_p, first.(δs), last.(δs); color=Cycled(j + 2), label=name)
-    ax = Axis(fig[fldmod1(j + 1, 2)...]; xlabel="Re ω", ylabel="Im ω", title=name)
+    local ax = Axis(fig[fldmod1(j + 1, 2)...]; xlabel="Re ω", ylabel="Im ω", title=name)
     pairs0 = eigenpairs_near(A(position(q, 0.)), linearised_targets(position(q, 0.)))
     println(name)
     for (k, (λ0, r0)) ∈ enumerate(pairs0)
-        t = @elapsed sol, info = track(A, q, λ0, r0)
+        local t = @elapsed sol, info = track(A, q, λ0, r0)
         lands = argmin(abs.(first.(pairs0) .- sol.u[end][end]))
         println("  mode $k → mode $lands,  |λ(1) - λ_start| = ", round(abs(sol.u[end][end] - first(pairs0[lands])), sigdigits=2),
             ",  ", sol.stats.naccept, " steps, ", info.factorisations, " LU, ", round(t, digits=1), " s")
@@ -169,17 +169,17 @@ fig = Figure(size=(1200, 450))
 ax1 = Axis(fig[1, 1]; xlabel="Δ", ylabel="F / F_EP", title="bisection boxes")
 ax2 = Axis(fig[1, 2]; xlabel="Δ", ylabel="F / F_EP", title="zoom on the last levels")
 for (k, r) ∈ enumerate(hist), ax ∈ (ax1, ax2)
-    lines!(ax, [r[1], r[2], r[2], r[1], r[1]], [r[3], r[3], r[4], r[4], r[3]]; color=k, colorrange=(1, length(hist)), colormap=:viridis)
+    lines!(ax, [r[1], r[2], r[2], r[1], r[1]], [r[3], r[3], r[4], r[4], r[3]]; color=k, colorrange=(1, length(hist)), colormap=clrs[:byz])
 end
 for ax ∈ (ax1, ax2)
-    scatter!(ax, [Δ_EP], [1.0]; marker=:star5, markersize=14, color=:white, label="linearised EP")
-    scatter!(ax, [Δ_c], [f_c]; marker=:xcross, markersize=12, color=:red, label="full EP (box centre)")
+    scatter!(ax, [Δ_EP], [1.0]; marker=:star5, markersize=14, color=clrs[:text], label="linearised EP")
+    scatter!(ax, [Δ_c], [f_c]; marker=:xcross, markersize=12, color=clrs[:byzantine], label="full EP (box centre)")
 end
 zr = hist[min(7, end)]
 limits!(ax2, zr[1], zr[2], zr[3], zr[4])
 axislegend(ax1; position=:rt, labelsize=10)
 ax3 = Axis(fig[1, 3]; xscale=log10, yscale=log10, xlabel="box diagonal", ylabel="|λ₁ - λ₂| at the box centre", title="gap ∝ √size")
 scatter!(ax3, sizes, gaps)
-lines!(ax3, sizes, gaps[end]*sqrt.(sizes ./ sizes[end]); linestyle=:dash, color=:gray, label="∝ √size")
+lines!(ax3, sizes, gaps[end]*sqrt.(sizes ./ sizes[end]); linestyle=:dash, color=clrs[:overlay], label="∝ √size")
 axislegend(ax3; position=:lt)
 fig

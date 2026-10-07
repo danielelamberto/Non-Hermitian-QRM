@@ -105,4 +105,26 @@ end
         @test minimum(abs(ω[i] - ω[j]) for i ∈ eachindex(ω) for j ∈ i+1:length(ω)) < 1e-6
     end
 
+    @testset "Jaynes–Cummings with RWA_env: closed form and the tower of EPs" begin
+        Nc = 5
+        â, σ̂ = qrm_operators(Nc)
+        jc = QRM(ωa=1.0, ωb=0.97, g=0.02, γa=0.1, γb=0.0, approx=[RWA_env, RWA_coupling])
+        L = liouvillian(Lindbladian(â, σ̂, jc)...).data
+        @test spectrum_distance(eigvals(Matrix(L)), jc_spectrum(jc, Nc)) < 1e-12
+        idx = excitation_sector(Nc, 1)
+        @test norm(L[setdiff(1:size(L, 1), idx), idx]) == 0                # L conserves the excitation-number difference
+        @test spectrum_distance(eigvals(Matrix(L[idx, idx])), jc_spectrum(jc, Nc; k=1)) < 1e-12
+        # scan of the plane (g, ωb) in the sector k = 1: one leaf per EP_n (n = 1…4), with 3 or 4 swaps, nothing else
+        A = AffineLiouvillian(δ -> liouvillian(Lindbladian(â, σ̂, setproperties(jc, (g=δ[1], ωb=δ[2])))...).data[idx, idx], 2)
+        gs, ωbs = range(0.0101, 0.0303, 9), range(0.9713, 1.0291, 9)
+        F = eigen(Matrix(A(P2(gs[1], ωbs[1]))))
+        leaves = refine_tracked(A, tracked_scan(A, gs, ωbs, collect(zip(F.values, eachcol(F.vectors)))), 8)
+        @test length(leaves) == Nc - 1
+        for n ∈ 1:Nc - 1
+            ωb, g, _ = jc_EP(jc, n)
+            k = findfirst(c -> c.rect[1] ≤ g ≤ c.rect[2] && c.rect[3] ≤ ωb ≤ c.rect[4], leaves)
+            @test k !== nothing && length(leaves[k].swaps) == (n ∈ (1, Nc - 1) ? 3 : 4) && isempty(leaves[k].windings)
+        end
+    end
+
 end

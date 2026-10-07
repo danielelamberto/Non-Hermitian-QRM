@@ -37,7 +37,7 @@ for (label, col, marker, f) ∈ series
     end
 end
 for ax ∈ (ax_re, ax_im)
-    vlines!(ax, [γ_EP]; color=:gray, linestyle=:dash)
+    vlines!(ax, [γ_EP]; color=clrs[:overlay], linestyle=:dash)
 end
 axislegend(ax_im; position=:lb, merge=true, unique=true)
 
@@ -126,17 +126,17 @@ us = range(0, 1, 401)
 
 fig = Figure(size=(1000, 1300))
 ax_p = Axis(fig[1, 1]; xlabel="δω", ylabel="δγ", title="loops in parameter space")
-scatter!(ax_p, [0, 0], [δγ_EP, -δγ_EP]; marker=:star5, markersize=14, color=:white, label="EPs")
+scatter!(ax_p, [0, 0], [δγ_EP, -δγ_EP]; marker=:star5, markersize=14, color=clrs[:text], label="EPs")
 for (j, (name, q)) ∈ enumerate(dimer_loops)
     δs = position.(Ref(q), us)
     lines!(ax_p, first.(δs), last.(δs); color=Cycled(j + 2), label=name)
-    ax = Axis(fig[fldmod1(j + 1, 2)...]; xlabel="Re ω", ylabel="Im ω", title=name)
+    local ax = Axis(fig[fldmod1(j + 1, 2)...]; xlabel="Re ω", ylabel="Im ω", title=name)
     scatter!(ax, vcat((real.(im .* disc_λ(δ)) for δ ∈ δs[1:4:end])...), vcat((imag.(im .* disc_λ(δ)) for δ ∈ δs[1:4:end])...);
-        color=:gray, markersize=4)
+        color=clrs[:overlay], markersize=4)
     pairs0 = eigenpairs_near(A(position(q, 0.)), disc_λ(position(q, 0.)))
     println(name)
     for (k, (λ0, r0)) ∈ enumerate(pairs0)
-        t = @elapsed sol, info = track(A, q, λ0, r0)
+        local t = @elapsed sol, info = track(A, q, λ0, r0)
         lands = argmin(abs.(first.(pairs0) .- sol.u[end][end]))
         dev = maximum(minimum(abs.(sol(u)[end] .- disc_λ(position(q, u)))) for u ∈ us)
         println("  mode $k → mode $lands,  max |λ - λ_disc| = ", round(dev, sigdigits=2), ",  ", sol.stats.naccept, " steps, ",

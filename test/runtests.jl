@@ -167,6 +167,45 @@ end
         @test max(rect[2] - rect[1], rect[4] - rect[3]) < 0.01
     end
 
+    @testset "EP-line tracker (3D)" begin
+        # synthetic family with a curved line of EP2s: a 2×2 block [λc + μ + w  1; c  λc + μ - w] with w = x + iy,
+        # c = z0 - z - iη, μ = 0.1(x - iz), plus spectators far away. D = 4(w² + c): EPs on xy = η/2, z = z0 + x² - y²,
+        # with λ = λc + μ there. Not a Liouvillian (no conjugate pairs): the tracker only needs the family interface.
+        λc, z0, η = -0.2 - 0.3im, 0.5, 0.02
+        spect = ComplexF64[-1.3-0.4im, -0.9+0.8im, -1.6, -1.1-1.4im, -2.0+0.3im, -0.7+1.5im, -1.8-0.9im, -2.4]
+        n = 2 + length(spect)
+        term(entries) = sparse(first.(first.(entries)), last.(first.(entries)), ComplexF64.(last.(entries)), n, n)
+        A = AffineLiouvillian(term([(1, 1) => λc, (2, 2) => λc, (1, 2) => 1, (2, 1) => z0 - im*η,
+                                    [(k + 2, k + 2) => s for (k, s) ∈ enumerate(spect)]...]),
+                              [term([(1, 1) => 1.1, (2, 2) => -0.9]), term([(1, 1) => 1im, (2, 2) => -1im]),
+                               term([(1, 1) => -0.1im, (2, 2) => -0.1im, (2, 1) => -1])])
+        λ_EP(P) = λc + 0.1*P[1] - 0.1im*P[3]
+        P_ex = P3(0.2, η/0.4, z0 + 0.2^2 - (η/0.4)^2)
+        P0 = P_ex + P3(0.003, -0.002, 0.001)                               # an approximate seed
+        bounds = (P3(-0.5, -0.5, 0), P3(0.5, 0.5, 1))
+        for direction ∈ (1, -1)
+            line = track_ep_line(A, P0, λ_EP(P0); h=0.02, direction, nsteps=40, bounds)
+            @test line.status == :left_bounds && length(line.points) ≥ 5
+            @test all(P -> abs(2P[1]*P[2] - η) < 1e-12 && abs(P[3] - z0 - P[1]^2 + P[2]^2) < 1e-12, line.points)
+            @test maximum(abs.(line.λs .- λ_EP.(line.points))) < 1e-9
+            # tangents: along the exact one, d(x, y, z)/dx = (1, -y/x, 2x + 2y²/x), oriented by direction
+            exact_t(P) = normalize(P3(1, -P[2]/P[1], 2P[1] + 2P[2]^2/P[1]))
+            @test all(((P, t),) -> abs(t ⋅ exact_t(P)) > 1 - 1e-8, zip(line.points, line.tangents))
+            @test sign(line.tangents[1] ⋅ exact_t(line.points[1])) == direction
+        end
+        # slice of a non-affine family (generic method): the same matrices as the affine slice
+        e1, e2 = plane_basis(P3(0.3, 0.2, 1.0))
+        R = Reparametrised(A, ξ -> ξ)
+        @test norm(slice(R, P_ex, e1, e2)(P2(0.03, -0.02)) - slice(A, P_ex, e1, e2)(P2(0.03, -0.02))) < 1e-14
+        # the 3D mock (inert z): a straight vertical EP line, eigenvalue -γ0 - iω0 (and its conjugate pair, far away)
+        ep = only(filter(p -> p.block == 2 && p.y < 0.7, pts))
+        A3 = AffineLiouvillian(prm_P -> mock_matrix(mock_at(prm_P)), 3)
+        line = track_ep_line(A3, P3(ep.x + 0.002, ep.y - 0.001, 0.3), ep.λ; h=0.05, nsteps=6)
+        @test line.status == :max_steps
+        @test all(P -> norm(P[1:2] - SVector(ep.x, ep.y)) < 1e-9, line.points) && abs(line.points[end][3] - 0.3) > 0.2
+        @test maximum(abs.(line.λs .- ep.λ)) < 1e-9
+    end
+
     @testset "boson dimer: Lindblad modes = roots of disc" begin
         n = 6                                     # the counter-rotating coupling at g = 0.2 needs n > 4
         â, b̂ = destroy(n) ⊗ eye(n), eye(n) ⊗ destroy(n)

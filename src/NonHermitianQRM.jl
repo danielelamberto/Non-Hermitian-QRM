@@ -8,7 +8,8 @@ Tools to find exceptional points (EPs) of Liouvillians.
 - Monodromy: eigenpairs followed continuously around loops in a two-parameter plane swap when the loop encloses an EP.
   Paths in 2D or 3D (`paths.jl`), Liouvillians affine in the parameters, their restriction to planes and
   reparametrisations (`affine.jl`), predictor–corrector tracking of one eigenpair (`tracking.jl`), localisation of one
-  EP by bisection (`bisection.jl`), and a systematic scan of a grid (`scan.jl`). Method and validation:
+  EP by bisection (`bisection.jl`), a systematic scan of a grid (`scan.jl`), and the continuation of a line of EPs
+  through a three-parameter space (`epline.jl`). Method and validation:
   notes/monodromy_tracking.typ.
 
 The notebooks in notebooks/ load it with `using NonHermitianQRM`. The coworker's functions_QRM.jl is separate.
@@ -35,6 +36,7 @@ include("affine.jl")
 include("tracking.jl")
 include("bisection.jl")
 include("scan.jl")
+include("epline.jl")
 
 # models.jl
 export Model, Approximation, RWA_env, RWA_coupling, N_conserving, linearised, Boson, BosonDimer, Duffing, Optomech,
@@ -56,5 +58,7 @@ export Eigenpair, eigenpairs_near, pair_near, normalisation, StaleLU, tangent, c
 export TrackedLine, branch, track_line, pair_midpoint, rect_swaps, ep_bisect
 # scan.jl
 export NodeLabel, TrackedEdge, TrackedGrid, ScanCell, flagged, track_edge, track_grid, tracked_scan, refine_tracked
+# epline.jl
+export pair_disc, disc_gradient, ep_tangent, ep_newton, ep_correct, EPLine, track_ep_line
 
 end

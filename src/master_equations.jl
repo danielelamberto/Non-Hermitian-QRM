@@ -181,7 +181,7 @@ function dominant_mode(L::QuantumObject, a::QuantumObject, idx; ωmax=3.)
     λ, V = eigen(Matrix(L.data[idx, idx]))
     ta, tad = vec(transpose(a.data))[idx], vec(transpose(a.data'))[idx]     # tr(a ρ) = vec(aᵀ) ⋅ vec(ρ)
     ok = findall(l -> abs(imag(l)) < ωmax, λ)
-    w = [abs(dot(conj(ta), V[:, i])) + abs(dot(conj(tad), V[:, i])) for i ∈ ok]
+    w = [abs(conj(ta) ⋅ V[:, i]) + abs(conj(tad) ⋅ V[:, i]) for i ∈ ok]
     ω = im*λ[ok[argmax(w)]]
     return complex(abs(real(ω)), imag(ω)), maximum(real, λ)
 end

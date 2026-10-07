@@ -6,9 +6,10 @@ Tools to find exceptional points (EPs) of Liouvillians.
   with planted, exactly known singularities as a test bed (`mock.jl`), and the quantum Rabi model with its
   Jaynes–Cummings limit (`qrm.jl`).
 - Monodromy: eigenpairs followed continuously around loops in a two-parameter plane swap when the loop encloses an EP.
-  Paths (`paths.jl`), Liouvillians affine in the parameters (`affine.jl`), predictor–corrector tracking of one
-  eigenpair (`tracking.jl`), localisation of one EP by bisection (`bisection.jl`), and a systematic scan of a grid
-  (`scan.jl`). Method and validation: notes/monodromy_tracking.typ.
+  Paths in 2D or 3D (`paths.jl`), Liouvillians affine in the parameters, their restriction to planes and
+  reparametrisations (`affine.jl`), predictor–corrector tracking of one eigenpair (`tracking.jl`), localisation of one
+  EP by bisection (`bisection.jl`), and a systematic scan of a grid (`scan.jl`). Method and validation:
+  notes/monodromy_tracking.typ.
 
 The notebooks in notebooks/ load it with `using NonHermitianQRM`. The coworker's functions_QRM.jl is separate.
 """
@@ -20,6 +21,7 @@ using SparseArrays
 using Polynomials
 using Accessors
 using OrdinaryDiffEqVerner
+import ForwardDiff                    # Jacobians of reparametrisations (Reparametrised)
 import QuantumToolbox: SVector
 import Base: position                 # position(path, u): methods for our paths
 import Polynomials: derivative        # derivative(A::AffineLiouvillian, v): method for our affine Liouvillians
@@ -46,8 +48,8 @@ export MockBlock, DimerBlock, DrivenQubit, DetunedQubit, MockLiouvillian, defaul
 # qrm.jl
 export QRM, qrm_operators, excitation_sector, jc_effective_energies, jc_spectrum, jc_EP
 # paths.jl, affine.jl
-export P2, ParamPath, Circle, Polygon, Segment, velocity, breakpoints, AffineLiouvillian, evaluate!, derivative,
-       derivative!
+export P2, P3, ParamPath, plane_basis, Circle, Polygon, Segment, velocity, breakpoints, AffineLiouvillian, work_matrix,
+       evaluate!, derivative, derivative!, slice, Reparametrised
 # tracking.jl
 export Eigenpair, eigenpairs_near, pair_near, normalisation, StaleLU, tangent, correct!, track, tracking_succeeded
 # bisection.jl

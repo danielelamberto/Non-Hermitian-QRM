@@ -14,9 +14,9 @@ mkpath(figdir)
 
 #%% Helpers: windows, comparison with the planted singularities, plots of a scan
 
-# The eigenpairs with Im λ > 0 of the dense L at δ: the window followed by the scans (one diagonalisation).
-function upper_window(A, δ)
-    F = eigen(Matrix(A(δ)))
+# The eigenpairs with Im λ > 0 of the dense L at P: the window followed by the scans (one diagonalisation).
+function upper_window(A, prm_P)
+    F = eigen(Matrix(A(prm_P)))
     return [(F.values[k], F.vectors[:, k]) for k ∈ findall(λ -> imag(λ) > 1e-8, F.values)]
 end
 
@@ -79,7 +79,7 @@ scan_legend(pos) = Legend(pos,
 # the gap at every planted singularity (√ at an EP2, linear at a DP), then maps the smallest gap over the square in the
 # default coherence sector, where the planted singularities are the only ones.
 mock = MockLiouvillian()
-mock_at(δ) = setproperties(mock, (x=δ[1], y=δ[2]))
+mock_at(prm_P) = setproperties(mock, (x=prm_P[1], y=prm_P[2]))
 pts, plines = mock_singularities(mock)              # planted points and lines
 for p ∈ pts
     println("planted ", rpad(p.kind, 4), " block $(p.block) at (x, y) = (", p.x, ", ", round(p.y, digits=6), "),  λ = ", p.λ)
@@ -90,15 +90,20 @@ end
 
 # closed form vs numerical spectrum at random points, and affinity in (x, y)
 for sector ∈ (:coherences, :within)
-    err = maximum(spectrum_distance(eigvals(Matrix(mock_matrix(mock_at(δ); sector))), mock_spectrum(mock_at(δ); sector))
-                  for δ ∈ (rand(2) for _ ∈ 1:20))
+    err = maximum(spectrum_distance(eigvals(Matrix(mock_matrix(mock_at(prm_P); sector))),
+                                    mock_spectrum(mock_at(prm_P); sector))
+                  for prm_P ∈ (rand(2) for _ ∈ 1:20))
     println("sector $sector ($(length(mock_sector(mock; sector))) states): max |λ_numerical - λ_closed form| over 20 random points = ", err)
 end
-A_mock = AffineLiouvillian(δ -> mock_matrix(mock_at(δ)), 2)
+A_mock = AffineLiouvillian(prm_P -> mock_matrix(mock_at(prm_P)), 2)
 println("affine in (x, y): accepted by AffineLiouvillian")
 
 # gap scaling at the planted singularities, from the numerical eigenvalues: exponent of gap ∝ distance^p
-pair_gap(δ, λ0) = (v = eigvals(Matrix(mock_matrix(mock_at(δ)))); i = sortperm(abs.(v .- λ0)); abs(v[i[1]] - v[i[2]]))
+function pair_gap(prm_P, λ0)
+    v = eigvals(Matrix(mock_matrix(mock_at(prm_P))))
+    i = sortperm(abs.(v .- λ0))
+    return abs(v[i[1]] - v[i[2]])
+end
 gap_exponent(gap) = log10(gap(1e-4)/gap(1e-6))/2
 for p ∈ pts
     println(rpad("$(p.kind) at ($(p.x), $(round(p.y, digits=4)))", 30), " exponent ",
@@ -107,11 +112,12 @@ end
 for l ∈ plines
     a, b, c = l.coeffs
     n = P2(a, b)/hypot(a, b)
-    δ0 = P2(-(0.6b + c)/a, 0.6)                         # the point of the line at y = 0.6, approached along its normal
+    prm_P0 = P2(-(0.6b + c)/a, 0.6)                     # the point of the line at y = 0.6, approached along its normal
     # the coalescing pair: -3γ/4 ± ... for the driven qubit (3rd entry), -γ/2 ± iΔ for the detuned one (1st entry)
-    λ0 = block_spectrum(mock.blocks[l.block], δ0...)[l.kind == :real_EP2 ? 3 : 1]
-    println(rpad("$(l.kind) at ($(δ0[1]), $(round(δ0[2], digits=4)))", 30), " exponent ",
-        round(gap_exponent(d -> pair_gap(δ0 + d*n, λ0)), digits=3), "  (expected ", l.kind == :real_EP2 ? 0.5 : 1.0, ")")
+    λ0 = block_spectrum(mock.blocks[l.block], prm_P0...)[l.kind == :real_EP2 ? 3 : 1]
+    println(rpad("$(l.kind) at ($(prm_P0[1]), $(round(prm_P0[2], digits=4)))", 30), " exponent ",
+        round(gap_exponent(d -> pair_gap(prm_P0 + d*n, λ0)), digits=3),
+        "  (expected ", l.kind == :real_EP2 ? 0.5 : 1.0, ")")
 end
 
 # map of the smallest gap between eigenvalues (steady states, one per block, excluded) with the planted structures
@@ -211,8 +217,8 @@ fig = Figure(size=(330*n_col, 300*length(mock_loops)))
 for (row, (name, q)) ∈ enumerate(mock_loops)
     inner = filter(p -> encloses(q, p), pts)
     ax_p = Axis(fig[row, 1]; xlabel="x", ylabel="y", title=name, aspect=DataAspect(), xticks=WilkinsonTicks(3))
-    δs = position.(Ref(q), us)
-    lines!(ax_p, first.(δs), last.(δs); color=clrs[:overlay])
+    prm_Ps = position.(Ref(q), us)
+    lines!(ax_p, first.(prm_Ps), last.(prm_Ps); color=clrs[:overlay])
     scatter!(ax_p, [position(q, 0.)[1]], [position(q, 0.)[2]]; color=clrs[:overlay], markersize=8)
     near = q isa Circle ? filter(p -> hypot(p.x - q.center[1], p.y - q.center[2]) < 3q.ρ, pts) : pts
     scatter!(ax_p, [p.x for p ∈ near], [p.y for p ∈ near]; marker=[p.kind == :EP2 ? :star5 : :circle for p ∈ near],
@@ -280,7 +286,7 @@ summary = NamedTuple[]
 overview = Figure(size=(1600, 860))
 for (n, seed) ∈ enumerate(seeds)
     m = MockLiouvillian(blocks=random_mock_blocks(MersenneTwister(seed)))
-    A = AffineLiouvillian(δ -> mock_matrix(setproperties(m, (x=δ[1], y=δ[2]))), 2)
+    A = AffineLiouvillian(prm_P -> mock_matrix(setproperties(m, (x=prm_P[1], y=prm_P[2]))), 2)
     local start = upper_window(A, P2(0, 0))              # the only diagonalisation
     t = @elapsed begin
         cells_m = tracked_scan(A, xs, ys, start)

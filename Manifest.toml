@@ -2,7 +2,7 @@
 
 julia_version = "1.13.1"
 manifest_format = "2.1"
-project_hash = "b45786423042d8a2d1caaa3529eaf7ff42078a6c"
+project_hash = "70e937be7637628f19595c5ebf2960c6b0db94c5"
 
 [[deps.ADTypes]]
 deps = ["PrecompileTools"]
@@ -998,7 +998,7 @@ uuid = "ca575930-c2e3-43a9-ace4-1e988b2c1908"
 version = "1.3.0"
 
 [[deps.NonHermitianQRM]]
-deps = ["Accessors", "LinearAlgebra", "OrdinaryDiffEqVerner", "Polynomials", "QuantumToolbox", "SparseArrays"]
+deps = ["Accessors", "ForwardDiff", "LinearAlgebra", "OrdinaryDiffEqVerner", "Polynomials", "QuantumToolbox", "SparseArrays"]
 path = "."
 uuid = "5e3b8e02-acbc-4737-a0c6-87c9c128a9df"
 version = "0.1.0"

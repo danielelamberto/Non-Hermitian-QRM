@@ -84,7 +84,8 @@ fig
 # (manifold 0 is one state) and n = Nc - 1 (the truncated manifold Nc is one state). The grid is generic: no node row
 # lies on the resonance ωb = ωa.
 idx = excitation_sector(Nc, 1)
-A_jc = AffineLiouvillian(δ -> liouvillian(Lindbladian(â, σ̂, setproperties(jc, (g=δ[1], ωb=δ[2])))...).data[idx, idx], 2)
+jc_at(prm_P) = setproperties(jc, (g=prm_P[1], ωb=prm_P[2]))
+A_jc = AffineLiouvillian(prm_P -> liouvillian(Lindbladian(â, σ̂, jc_at(prm_P))...).data[idx, idx], 2)
 gs, ωbs = range(0.0061, 0.0303, 39), range(0.9713, 1.0291, 39)
 F = eigen(Matrix(A_jc(P2(gs[1], ωbs[1]))))                # the only diagonalisation
 start = collect(zip(F.values, eachcol(F.vectors)))

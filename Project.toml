@@ -5,11 +5,15 @@ authors = ["theo <theo.sepulcre@gmail.com>"]
 
 [deps]
 Accessors = "7d9f7c33-5ae7-4f3b-8dc6-eff91059b697"
+ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 OrdinaryDiffEqVerner = "79d7bb75-1356-48c1-b8c0-6832512096c2"
 Polynomials = "f27b6e38-b328-58d1-80ce-0feddd5e7a45"
 QuantumToolbox = "6c2fb7c5-b903-41d2-bc5e-5a7c320b9fab"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+
+[compat]
+ForwardDiff = "1.4.6"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"

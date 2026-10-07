@@ -100,7 +100,7 @@ fig
 
 #%% Monodromy, coupled bosons: tracking the Liouvillian modes around the EP (Lindblad, RWA_env)
 
-# Lindblad dimer in the plane δ = (δω, δγ): detuning ±δω and damping asymmetry ±δγ around ω0 = 1, γ0 = 0.1, g = 0.01.
+# Lindblad dimer in the plane P = (δω, δγ): detuning ±δω and damping asymmetry ±δγ around ω0 = 1, γ0 = 0.1, g = 0.01.
 # EPs at δω = 0, δγ = ±g/2. Both modes are tracked around five loops and compared with -iω from the roots of disc
 # (same parametrisation). Expected: a swap for a loop around one EP, none around zero or two EPs.
 n_fock = 5
@@ -108,12 +108,13 @@ n_fock = 5
 b̂ = eye(n_fock) ⊗ destroy(n_fock)
 g = 0.01
 mdl = BosonDimer(g=g, approx=[RWA_env])
-dimer(δ) = setproperties(mdl, (ωa=1 + δ[1], ωb=1 - δ[1], γa=0.1 + δ[2], γb=0.1 - δ[2]))
-A = AffineLiouvillian(δ -> liouvillian(Lindbladian(â, b̂, dimer(δ))...).data, 2)
+dimer(prm_P) = setproperties(mdl, (ωa=1 + prm_P[1], ωb=1 - prm_P[1],
+                                   γa=0.1 + prm_P[2], γb=0.1 - prm_P[2]))
+A = AffineLiouvillian(prm_P -> liouvillian(Lindbladian(â, b̂, dimer(prm_P))...).data, 2)
 
 # EP(⋅) returns g_EP ∝ |γa - γb| at δω = 0: rescale to find the δγ where g_EP = g
 δγ_EP = g*0.01/EP(dimer(P2(0, 0.01)))[1]
-disc_λ(δ) = -im .* filter(r -> real(r) > 0, roots_sorted(dimer(δ)))
+disc_λ(prm_P) = -im .* filter(r -> real(r) > 0, roots_sorted(dimer(prm_P)))
 
 dimer_loops = [
     ("circle, 1 EP",                Circle(P2(0, 0.01), 0.01)),
@@ -128,11 +129,11 @@ fig = Figure(size=(1000, 1300))
 ax_p = Axis(fig[1, 1]; xlabel="δω", ylabel="δγ", title="loops in parameter space")
 scatter!(ax_p, [0, 0], [δγ_EP, -δγ_EP]; marker=:star5, markersize=14, color=clrs[:text], label="EPs")
 for (j, (name, q)) ∈ enumerate(dimer_loops)
-    δs = position.(Ref(q), us)
-    lines!(ax_p, first.(δs), last.(δs); color=Cycled(j + 2), label=name)
+    prm_Ps = position.(Ref(q), us)
+    lines!(ax_p, first.(prm_Ps), last.(prm_Ps); color=Cycled(j + 2), label=name)
     local ax = Axis(fig[fldmod1(j + 1, 2)...]; xlabel="Re ω", ylabel="Im ω", title=name)
-    scatter!(ax, vcat((real.(im .* disc_λ(δ)) for δ ∈ δs[1:4:end])...), vcat((imag.(im .* disc_λ(δ)) for δ ∈ δs[1:4:end])...);
-        color=clrs[:overlay], markersize=4)
+    local ωs = reduce(vcat, im .* disc_λ(prm_P) for prm_P ∈ prm_Ps[1:4:end])
+    scatter!(ax, real.(ωs), imag.(ωs); color=clrs[:overlay], markersize=4)
     pairs0 = eigenpairs_near(A(position(q, 0.)), disc_λ(position(q, 0.)))
     println(name)
     for (k, (λ0, r0)) ∈ enumerate(pairs0)

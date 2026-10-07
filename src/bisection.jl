@@ -30,8 +30,8 @@ The parameter s of the point `x` along `l`, or `nothing` if x is not on l.
 """
 function line_param(l::TrackedLine, x; tol=1e-9)
     d = l.b - l.a
-    s = dot(x - l.a, d)/dot(d, d)
-    on = abs(d[1]*(x - l.a)[2] - d[2]*(x - l.a)[1]) ≤ tol*dot(d, d) && -tol ≤ s ≤ 1 + tol
+    s = (x - l.a) ⋅ d/(d ⋅ d)
+    on = abs(d[1]*(x - l.a)[2] - d[2]*(x - l.a)[1]) ≤ tol*(d ⋅ d) && -tol ≤ s ≤ 1 + tol
     return on ? clamp(s, 0., 1.) : nothing
 end
 

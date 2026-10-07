@@ -50,7 +50,7 @@ end
 
 The normalisation vector c = r/(r'r), for which c'r = 1.
 """
-normalisation(r) = r/dot(r, r)
+normalisation(r) = r/(r ⋅ r)
 
 """
     bordered(L, λ, r, c)
@@ -73,7 +73,7 @@ function bordered_mul!(y, L::SparseMatrixCSC, λ, r, c, x)
     xr, yr = view(x, 1:n), view(y, 1:n)
     mul!(yr, L, xr)
     yr .-= λ .* xr .+ x[n + 1] .* r
-    y[n + 1] = dot(c, xr)
+    y[n + 1] = c ⋅ xr
     return y
 end
 
@@ -251,9 +251,9 @@ function correct!(r, L::SparseMatrixCSC, λ, c; tol=1e-12, maxiter=5, solver=not
     Lr .-= λ .* r
     res0 = norm(Lr)/norm(r)
     res, it = res0, 0
-    while (res > tol || abs(dot(c, r) - 1) > tol) && it < maxiter
+    while (res > tol || abs(c ⋅ r - 1) > tol) && it < maxiter
         Lr .*= -1                                       # b = [λr - Lr; 1 - c'r]
-        b[n + 1] = 1 - dot(c, r)
+        b[n + 1] = 1 - c ⋅ r
         x = solve_bordered!(solver, L, λ, r, c, b)
         r .+= view(x, 1:n)
         λ += x[n + 1]
@@ -268,8 +268,9 @@ end
     track(A, p::ParamPath, λ0, r0; alg=Vern7(lazy=false), reltol=1e-10, abstol=1e-12, corrector=true, tol=1e-12,
           reset_cos=0.1, stale=true, tspan=(0.0, 1.0), kwargs...)
 
-Follows the eigenpair (λ0, r0) of `A` (an `AffineLiouvillian`) along the path `p`, by integrating
-d[r; λ]/du = `tangent` over `tspan` (default: the whole path) with the path's breakpoints as tstops.
+Follows the eigenpair (λ0, r0) of `A` (an `AffineLiouvillian`, or any family with its interface: see affine.jl)
+along the path `p`, by integrating d[r; λ]/du = `tangent` over `tspan` (default: the whole path) with the path's
+breakpoints as tstops.
 Returns `(sol, diagnostics)`: λ(u) = sol(u)[end], r(u) = sol(u)[1:end-1].
 - `corrector`: Newton correction (`correct!`) after every accepted step, and reset of c to `normalisation(r)` when
   cos∠(c, r) = 1/(‖c‖‖r‖) < `reset_cos` (c'r = 1 is kept, r unchanged; ‖r‖ would grow otherwise).
@@ -277,8 +278,8 @@ Returns `(sol, diagnostics)`: λ(u) = sol(u)[end], r(u) = sol(u)[1:end-1].
 - `diagnostics`: corrections, Newton iterations, largest residual before a correction, c resets, factorisations,
   refinements.
 
-L(u) and dL/du are written in place into two matrices owned by this call, so concurrent calls on the same `A` are
-independent. c is the ODE parameter, reset in place by the callback: the solver must not interpolate lazily
+L(u) and dL/du are written in place into two `work_matrix(A)` owned by this call (they share only A's read-only index
+arrays), so concurrent calls on the same `A` are independent. c is the ODE parameter, reset in place by the callback: the solver must not interpolate lazily
 (`Vern7(lazy=false)`), lazy stages would be computed when sol(u) is called, with the latest c.
 """
 function track(A, p::ParamPath, λ0, r0; alg=Vern7(lazy=false), reltol=1e-10, abstol=1e-12,
@@ -286,10 +287,10 @@ function track(A, p::ParamPath, λ0, r0; alg=Vern7(lazy=false), reltol=1e-10, ab
     n = length(r0)
     c = normalisation(r0)
     solver = stale ? StaleLU() : nothing
-    L, dL = A(position(p, tspan[1])), derivative(A, velocity(p, tspan[1]))
+    L, dL = evaluate!(work_matrix(A), A, position(p, tspan[1])), work_matrix(A)     # dL: filled by rhs!
     function rhs!(dy, y, c, u)
         evaluate!(L, A, position(p, u))
-        derivative!(dL, A, velocity(p, u))
+        derivative!(dL, A, position(p, u), velocity(p, u))
         dr, dλ = tangent(L, dL, y[n + 1], view(y, 1:n), c; solver)
         view(dy, 1:n) .= dr
         dy[n + 1] = dλ

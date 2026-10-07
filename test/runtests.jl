@@ -2,12 +2,12 @@
 # and the Lindblad boson dimer (modes from the characteristic polynomial disc). About a minute on one thread.
 using Test
 using NonHermitianQRM
-using NonHermitianQRM: Circle
+using NonHermitianQRM: Circle, SVector
 using QuantumToolbox, LinearAlgebra, SparseArrays, Accessors
 
 mock = MockLiouvillian()
-mock_at(δ) = setproperties(mock, (x=δ[1], y=δ[2]))
-A_mock = AffineLiouvillian(δ -> mock_matrix(mock_at(δ)), 2)
+mock_at(prm_P) = setproperties(mock, (x=prm_P[1], y=prm_P[2]))
+A_mock = AffineLiouvillian(prm_P -> mock_matrix(mock_at(prm_P)), 2)
 pts, plines = mock_singularities(mock)
 
 # greedy matching distance between two spectra
@@ -21,9 +21,9 @@ function spectrum_distance(a, b)
     return e
 end
 
-# the two eigenpairs of the mock's block-`block` dimer at δ (from a dense diagonalisation)
-function dimer_pairs(δ, block)
-    F = eigen(Matrix(A_mock(δ)))
+# the two eigenpairs of the mock's block-`block` dimer at prm_P (from a dense diagonalisation)
+function dimer_pairs(prm_P, block)
+    F = eigen(Matrix(A_mock(prm_P)))
     λ0 = -mock.blocks[block].γ0 - im*mock.blocks[block].ω0
     return [(F.values[k], F.vectors[:, k]) for k ∈ partialsortperm(abs.(F.values .- λ0), 1:2)]
 end
@@ -37,17 +37,47 @@ end
 @testset "NonHermitianQRM" begin
 
     @testset "mock Liouvillian" begin
-        for sector ∈ (:coherences, :within), δ ∈ ([0.2, 0.7], [0.55, 0.31])
-            @test spectrum_distance(eigvals(Matrix(mock_matrix(mock_at(δ); sector))), mock_spectrum(mock_at(δ); sector)) < 1e-12
+        for sector ∈ (:coherences, :within), prm_P ∈ ([0.2, 0.7], [0.55, 0.31])
+            @test spectrum_distance(eigvals(Matrix(mock_matrix(mock_at(prm_P); sector))),
+                                    mock_spectrum(mock_at(prm_P); sector)) < 1e-12
         end
         @test count(p -> p.kind == :EP2, pts) == 4 && count(p -> p.kind == :DP, pts) == 1
     end
 
     @testset "affine Liouvillian" begin
-        δ = P2(0.37, 0.81)
-        @test norm(A_mock(δ) - mock_matrix(mock_at(δ))) < 1e-12
+        prm_P = P2(0.37, 0.81)
+        @test norm(A_mock(prm_P) - mock_matrix(mock_at(prm_P))) < 1e-12
         @test norm(derivative(A_mock, P2(1, 0)) - (mock_matrix(mock_at(P2(1, 0))) - mock_matrix(mock_at(P2(0, 0))))) < 1e-12
-        @test_throws ArgumentError AffineLiouvillian(δ -> sparse(Diagonal([1.0, δ[1]^2])), 1; h=0.1)
+        @test_throws ArgumentError AffineLiouvillian(prm_P -> sparse(Diagonal([1.0, prm_P[1]^2])), 1; h=0.1)
+        # weak curvature: invisible at the scale h of the default check, caught by check_at in the domain
+        weak(prm_P) = mock_matrix(mock_at(prm_P)) + 1e-8*prm_P[1]^2*mock_matrix(mock_at([1.0, 0.0]))
+        @test AffineLiouvillian(weak, 2) isa AffineLiouvillian
+        @test_throws ArgumentError AffineLiouvillian(weak, 2; check_at=[1.0, 0.0])
+        @test AffineLiouvillian(prm_P -> sparse(2.0I, 3, 3), 2)(P2(0.3, 0.4)) == 2I(3)    # constant family: no 0/0
+        # work matrices share the pattern of the family; a matrix on another pattern is refused
+        W = work_matrix(A_mock)
+        @test W.colptr === A_mock.L0.colptr && evaluate!(W, A_mock, prm_P) == A_mock(prm_P)
+        @test derivative!(W, A_mock, prm_P, P2(1, 0)) == derivative(A_mock, P2(1, 0))
+        @test_throws ArgumentError evaluate!(sparse(complex(1.0)*I, size(A_mock.L0)...), A_mock, prm_P)
+    end
+
+    @testset "paths (2D and 3D)" begin
+        @test position(Circle(P2(0.3, 0.4), 0.1), 0.25) == P2(0.3, 0.5)      # 2D: counterclockwise from the right
+        n, ρ = P3(0.3, -0.2, 1.0), 0.07
+        q = Circle(P3(0.1, 0.2, 0.3), ρ, n)
+        @test q.e1 × q.e2 ≈ normalize(n)
+        @test all(u -> norm(position(q, u) - q.center) ≈ ρ && abs((position(q, u) - q.center) ⋅ n) < 1e-14, 0:0.1:1)
+        @test position(q, 0.0) ≈ position(q, 1.0)
+        h = 1e-6
+        @test all(u -> norm((position(q, u + h) - position(q, u - h))/2h - velocity(q, u)) < 1e-7, 0.05:0.1:0.95)
+        e1, e2 = plane_basis(P3(0, 0, 2))
+        @test e1 × e2 ≈ P3(0, 0, 1)
+        @test_throws ArgumentError Circle(P3(0, 0, 0), 1.0, P3(1, 0, 0), P3(1, 1, 0))
+        vs = [P3(0, 0, 0), P3(1, 0, 0), P3(1, 1, 1)]
+        tri = Polygon(vs)
+        @test [position(tri, u) for u ∈ [0; breakpoints(tri)]] ≈ vs && position(tri, 1.0) ≈ vs[1]
+        s = Segment(SVector(0, 0, 0), SVector(1, 2, 3))                              # integer vectors are converted
+        @test s isa Segment{3} && position(s, 0.5) == P3(0.5, 1, 1.5) && velocity(s, 0.3) == P3(1, 2, 3)
     end
 
     @testset "tracking around loops (mock)" begin
@@ -65,6 +95,38 @@ end
         @test maximum(minimum(abs.(sol(u)[end] .- mock_spectrum(mock_at(position(one_ep, u))))) for u ∈ 0:0.01:1) < 1e-8
         sol_fresh, _ = track(A_mock, one_ep, λ0, r0; stale=false)
         @test abs(sol.u[end][end] - sol_fresh.u[end][end]) < 1e-10
+        # 3D: the mock with an inert third coordinate, so that the EP is a line along z. A tilted circle links it iff
+        # its projection on (x, y), an ellipse, encloses the EP.
+        A3 = AffineLiouvillian(prm_P -> mock_matrix(mock_at(prm_P)), 3)
+        pairs_at(q) = dimer_pairs(position(q, 0.)[1:2], 2)
+        tilted = Circle(P3(ep.x, ep.y, 0.4), 0.05, P3(0.3, 0.2, 1.0))
+        @test swaps(A3, tilted, pairs_at(tilted))
+        beside = Circle(P3(ep.x + 0.1, ep.y, 0.4), 0.05, P3(0.3, 0.2, 1.0))
+        @test !swaps(A3, beside, pairs_at(beside))
+    end
+
+    @testset "reparametrised family (polar coordinates around a mock EP)" begin
+        ep = only(filter(p -> p.block == 2 && p.y < 0.7, pts))
+        c = P2(ep.x, ep.y)
+        polar(ξ) = c + ξ[1]*SVector(cos(ξ[2]), sin(ξ[2]))                        # ξ = (r, θ); generic for ForwardDiff
+        R = Reparametrised(A_mock, polar)
+        @test norm(R(P2(0.05, 0.3)) - A_mock(polar(P2(0.05, 0.3)))) < 1e-12
+        J_polar(ξ) = [cos(ξ[2]) -ξ[1]*sin(ξ[2]); sin(ξ[2]) ξ[1]*cos(ξ[2])]
+        @test Reparametrised(A_mock, polar; Jφ=J_polar, check_at=P2(0.05, 0.7)) isa Reparametrised
+        @test_throws ArgumentError Reparametrised(A_mock, polar; Jφ=ξ -> 2J_polar(ξ), check_at=P2(0.05, 0.7))
+        # a segment in θ at fixed r is the circle around the EP: it swaps the pair, the tracked eigenvalue is the
+        # closed form all along (this checks the chain rule), and the hand-written Jacobian gives the same result
+        θ_loop = Segment(P2(0.05, 0.0), P2(0.05, 2π))
+        pairs = dimer_pairs(polar(P2(0.05, 0.0)), 2)
+        @test swaps(R, θ_loop, pairs)
+        sol, _ = track(R, θ_loop, pairs[1]...)
+        exact(u) = mock_spectrum(mock_at(polar(position(θ_loop, u))))
+        @test maximum(minimum(abs.(sol(u)[end] .- exact(u))) for u ∈ 0:0.01:1) < 1e-8
+        sol_J, _ = track(Reparametrised(A_mock, polar; Jφ=J_polar), θ_loop, pairs[1]...)
+        @test abs(sol_J.u[end][end] - sol.u[end][end]) < 1e-10
+        # a scan of an annulus around the EP flags nothing: no cell of (r, θ) contains it
+        cells = tracked_scan(R, range(0.02, 0.08, 4), range(0, 2π, 9), pairs)
+        @test !any(flagged, cells) && all(cell -> cell.lost == 0, cells)
     end
 
     @testset "tracking scan (mock)" begin
@@ -86,9 +148,22 @@ end
 
     @testset "bisection (mock)" begin
         ep = only(filter(p -> p.block == 2 && p.y < 0.7, pts))
-        targets(δ) = first.(dimer_pairs(δ, 2))
+        targets(prm_P) = first.(dimer_pairs(prm_P, 2))
         rect, _, _ = ep_bisect(A_mock, (ep.x - 0.05, ep.x + 0.04, ep.y - 0.06, ep.y + 0.05), targets; depth=10)
         @test rect[1] ≤ ep.x ≤ rect[2] && rect[3] ≤ ep.y ≤ rect[4]
+        @test max(rect[2] - rect[1], rect[4] - rect[3]) < 0.01
+        # the corrector of an EP-line tracker: bisection in a tilted plane of the 3D mock (inert z: the EP is a
+        # vertical line), on the slice of the family, in the plane's own coordinates (s, t)
+        A3 = AffineLiouvillian(prm_P -> mock_matrix(mock_at(prm_P)), 3)
+        o = P3(ep.x + 0.01, ep.y - 0.005, 0.4)
+        e1, e2 = plane_basis(P3(0.3, 0.2, 1.0))
+        A_sl = slice(A3, o, e1, e2)
+        @test norm(A_sl(P2(0.03, -0.02)) - A3(o + 0.03*e1 - 0.02*e2)) < 1e-12
+        to_3d(st) = o + st[1]*e1 + st[2]*e2
+        st_ep = [e1[1] e2[1]; e1[2] e2[2]] \ [ep.x - o[1], ep.y - o[2]]     # where the EP line crosses the plane
+        targets_sl(st) = first.(dimer_pairs(to_3d(st)[1:2], 2))
+        rect, _, _ = ep_bisect(A_sl, (-0.05, 0.04, -0.045, 0.05), targets_sl; depth=10)
+        @test rect[1] ≤ st_ep[1] ≤ rect[2] && rect[3] ≤ st_ep[2] ≤ rect[4]
         @test max(rect[2] - rect[1], rect[4] - rect[3]) < 0.01
     end
 
@@ -115,7 +190,8 @@ end
         @test norm(L[setdiff(1:size(L, 1), idx), idx]) == 0                # L conserves the excitation-number difference
         @test spectrum_distance(eigvals(Matrix(L[idx, idx])), jc_spectrum(jc, Nc; k=1)) < 1e-12
         # scan of the plane (g, ωb) in the sector k = 1: one leaf per EP_n (n = 1…4), with 3 or 4 swaps, nothing else
-        A = AffineLiouvillian(δ -> liouvillian(Lindbladian(â, σ̂, setproperties(jc, (g=δ[1], ωb=δ[2])))...).data[idx, idx], 2)
+        jc_at(prm_P) = setproperties(jc, (g=prm_P[1], ωb=prm_P[2]))
+        A = AffineLiouvillian(prm_P -> liouvillian(Lindbladian(â, σ̂, jc_at(prm_P))...).data[idx, idx], 2)
         gs, ωbs = range(0.0101, 0.0303, 9), range(0.9713, 1.0291, 9)
         F = eigen(Matrix(A(P2(gs[1], ωbs[1]))))
         leaves = refine_tracked(A, tracked_scan(A, gs, ωbs, collect(zip(F.values, eachcol(F.vectors)))), 8)

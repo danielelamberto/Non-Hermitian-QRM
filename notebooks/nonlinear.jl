@@ -81,10 +81,10 @@ fig
 # Linearised fluctuations ≡ BosonDimer with ωa = -(Δ + g x̄) and coupling 2g|α| (linearised_dimer): EP at resonance and
 # 2g|α| = |γa - γb| (linearised_EP). The full model keeps the non-linear term -g d†d (e + e†). It is written in the
 # displaced frame a = α + d, b = β + e (reference at the linearised EP), where n_fock = 6 per mode is converged to ~1e-7.
-# The next two cells work in the plane δ = (Δ, F/F_EP), where L is affine (H is linear in Δ and F).
+# The next two cells work in the plane P = (Δ, F/F_EP), where L is affine (H is linear in Δ and F).
 mdl = Optomech(ωb=1., γa=0.2, γb=0.05, g=0.1, nBa=0., nBb=0., approx=[RWA_env])
 Δ_EP, F_EP, n_branches = linearised_EP(mdl)
-point(δ) = setproperties(mdl, (Δ=δ[1], F=δ[2]*F_EP))
+point(prm_P) = setproperties(mdl, (Δ=prm_P[1], F=prm_P[2]*F_EP))
 println("linearised EP: Δ = ", round(Δ_EP, digits=5), ", F = ", round(F_EP, digits=5), ", ", n_branches, " classical branch(es)")
 
 Na, Nb = 6, 6
@@ -92,10 +92,10 @@ Na, Nb = 6, 6
 b̂ = eye(Na) ⊗ destroy(Nb)
 α, β = classical_displacement(point(P2(Δ_EP, 1.0)))
 âd, b̂d = â + α*one(â), b̂ + β*one(b̂)        # displaced frame: the model functions see a = α + d, b = β + e
-A = AffineLiouvillian(δ -> liouvillian(Lindbladian(âd, b̂d, point(δ))...).data, 2)
+A = AffineLiouvillian(prm_P -> liouvillian(Lindbladian(âd, b̂d, point(prm_P))...).data, 2)
 
-# starting targets at δ = (Δ, F/F_EP): the linearised modes, λ = -iω (≈ 0.01 from the full ones at g = 0.1)
-linearised_targets(δ) = -im .* filter(r -> real(r) > 0, roots_sorted(linearised_dimer(point(δ))))
+# starting targets at P = (Δ, F/F_EP): the linearised modes, λ = -iω (≈ 0.01 from the full ones at g = 0.1)
+linearised_targets(prm_P) = -im .* filter(r -> real(r) > 0, roots_sorted(linearised_dimer(point(prm_P))))
 
 
 #%% Driven optomechanics: monodromy around the linearised EP in the (Δ, F) plane
@@ -113,8 +113,8 @@ fig = Figure(size=(1100, 900))
 ax_p = Axis(fig[1, 1]; xlabel="Δ", ylabel="F / F_EP", title="loops in parameter space")
 scatter!(ax_p, [Δ_EP], [1.0]; marker=:star5, markersize=16, color=clrs[:text], label="linearised EP")
 for (j, (name, q)) ∈ enumerate(om_loops)
-    δs = position.(Ref(q), us)
-    lines!(ax_p, first.(δs), last.(δs); color=Cycled(j + 2), label=name)
+    prm_Ps = position.(Ref(q), us)
+    lines!(ax_p, first.(prm_Ps), last.(prm_Ps); color=Cycled(j + 2), label=name)
     local ax = Axis(fig[fldmod1(j + 1, 2)...]; xlabel="Re ω", ylabel="Im ω", title=name)
     pairs0 = eigenpairs_near(A(position(q, 0.)), linearised_targets(position(q, 0.)))
     println(name)

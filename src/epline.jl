@@ -3,8 +3,9 @@
 # smooth in the parameters (the eigenvalues have a √ branch point at the EP, D does not), vanishes linearly at an EP2
 # and is symmetric in a, b: no branch labelling. Predictor–corrector continuation along the curve:
 #   predictor   a step h along the tangent t = ∇Re D × ∇Im D (finite differences of D)
-#   corrector   in the plane through the predicted point normal to t (`slice`): `ep_bisect` from a small square,
-#               which brackets the EP (the square swaps the pair), then Newton on D from the final rectangle
+#   corrector   in the plane through the predicted point normal to t (`slice`): Newton on D from the predicted point,
+#               checked by a small loop around the result that must swap the pair; if that fails, `ep_bisect` from a
+#               small square, which brackets the EP (the square swaps the pair), then Newton from the final rectangle
 # Real-axis EPs of a real Liouvillian have codimension 1 (surfaces in 3D): this tracker is for complex EP2s only.
 # The tangent and the normal planes use the Euclidean metric of the coordinates: rescale them (`Reparametrised`) if
 # the parameters have very different scales.
@@ -81,17 +82,45 @@ function ep_newton(A, st0::P2, σ; fd, xtol, maxiter=10)
 end
 
 """
-    ep_correct(A, prm_P, t, σ; w, depth=4, fd=1e-3w, xtol=1e-8w, kwargs...)
+    pair_swaps(A, q, σ; kwargs...)
 
-Corrector of the EP-line tracker: the EP in the plane through `prm_P` normal to `t` (3D), near the eigenvalue `σ`.
-`ep_bisect` on the `slice` of `A` from a square of half-width `w` around prm_P, slightly off-centre (it must swap the
-pair: one EP inside), `depth` levels, then `ep_newton` from the centre of the final rectangle, which must converge within that
-rectangle (up to half its size). `kwargs` are passed to `track`. Throws if any of this fails. Returns (EP, midpoint
-of the pair there).
+Whether following the two eigenvalues of `A` nearest `σ` once around the loop `q` swaps them (an odd number of their
+EPs inside). `kwargs` are passed to `track`; a tracking that fails counts as no swap.
 """
-function ep_correct(A, prm_P::P3, t::P3, σ; w, depth=4, fd=1e-3w, xtol=1e-8w, kwargs...)
+function pair_swaps(A, q::ParamPath, σ; kwargs...)
+    pairs = pair_near(A(position(q, 0.0)), σ)
+    sols = [first(track(A, q, λ0, r0; kwargs...)) for (λ0, r0) ∈ pairs]
+    all(tracking_succeeded, sols) || return false
+    λ_end = sols[1].u[end][end]
+    return abs(λ_end - pairs[2][1]) < abs(λ_end - pairs[1][1])
+end
+
+"""
+    ep_correct(A, prm_P, t, σ; w, newton_first=true, depth=4, fd=1e-3w, xtol=1e-8w, kwargs...)
+
+Corrector of the EP-line tracker: the EP in the plane through `prm_P` normal to `t` (3D), near the eigenvalue `σ`, on
+the `slice` of `A` in that plane.
+- `newton_first`: `ep_newton` from prm_P itself, accepted if it converges within the distance `w` of prm_P and a
+  circle of radius w/2 around the result swaps the pair (`pair_swaps`: an EP of this pair inside, so the same line).
+  Cheap: two tracked loops instead of a bisection's lines.
+- Otherwise, or if that fails: `ep_bisect` from a square of half-width `w` around prm_P, slightly off-centre (it must
+  swap the pair: one EP inside), `depth` levels, then `ep_newton` from the centre of the final rectangle, which must
+  converge within that rectangle (up to half its size).
+`kwargs` are passed to `track`. Throws if the bisection fails. Returns (EP, midpoint of the pair there).
+"""
+function ep_correct(A, prm_P::P3, t::P3, σ; w, newton_first=true, depth=4, fd=1e-3w, xtol=1e-8w, kwargs...)
     e1, e2 = plane_basis(t)
     A_sl = slice(A, prm_P, e1, e2)
+    if newton_first
+        try
+            st, λm, converged = ep_newton(A_sl, P2(0, 0), σ; fd, xtol)
+            converged && norm(st) ≤ w && pair_swaps(A_sl, Circle(st, w/2), λm; kwargs...) &&
+                return prm_P + st[1]*e1 + st[2]*e2, λm
+        catch err
+            err isa InterruptException && rethrow()
+            @debug "Newton-first corrector failed: $(sprint(showerror, err))"
+        end
+    end
     targets(st) = first.(pair_near(A_sl(st), σ))
     # off-centre by a generic fraction of w: with a good predictor the EP is near prm_P, which must not lie on the
     # first dividing lines of the bisection (the midlines of the square)
@@ -122,14 +151,15 @@ end
 
 """
     track_ep_line(A, prm_P0, σ0; h, direction=1, nsteps=200, hmin=h/64, hmax=4h, w_ratio=0.5, θmax=0.15,
-                  bounds=nothing, depth=4, fd_ratio=1e-3, xtol_ratio=1e-8, kwargs...)
+                  bounds=nothing, newton_first=true, depth=4, fd_ratio=1e-3, xtol_ratio=1e-8, kwargs...)
 
 Follows the line of EP2s of the three-parameter family `A` through `prm_P0`, an approximate EP (e.g. from a scan or
 `ep_bisect` in a 2D slice, mapped to 3D) whose coalesced eigenvalue is near `σ0`. Returns an `EPLine`.
 - Seed: the tangent at prm_P0, oriented by `direction` (±1: call twice for both halves of the line), then the
   corrector in the plane through prm_P0 normal to it.
-- Step: predictor P + h t, corrector `ep_correct` from a square of half-width `w_ratio*h` (the prediction error,
-  ~ θ h/2 for a turn θ per step, must stay well inside it), new tangent ∇Re D × ∇Im D there.
+- Step: predictor P + h t, corrector `ep_correct` within the distance `w_ratio*h` (the prediction error, ~ θ h/2 for
+  a turn θ per step, must stay well inside it; `newton_first` and `depth` are passed to it), new tangent
+  ∇Re D × ∇Im D there.
 - Step control: a step whose corrector fails, or whose tangent turns by more than `θmax` (radians), is rejected and h
   halved; after a step turning by less than θmax/3, h grows by 1.5, up to `hmax`.
 - Stops after `nsteps` points, when a point leaves `bounds = (lo, hi)` (corners of a box, `P3`), when the line closes,
@@ -138,11 +168,21 @@ Follows the line of EP2s of the three-parameter family `A` through `prm_P0`, an 
   below `xtol_ratio` times the box half-width. `kwargs` are passed to `track` (bisection lines).
 """
 function track_ep_line(A, prm_P0::P3, σ0; h, direction=1, nsteps=200, hmin=h/64, hmax=4h, w_ratio=0.5, θmax=0.15,
-                       bounds=nothing, depth=4, fd_ratio=1e-3, xtol_ratio=1e-8, kwargs...)
-    correct(prm_P, t, σ, h) = ep_correct(A, prm_P, t, σ; w=w_ratio*h, depth, fd=fd_ratio*w_ratio*h,
+                       bounds=nothing, newton_first=true, depth=4, fd_ratio=1e-3, xtol_ratio=1e-8, kwargs...)
+    correct(prm_P, t, σ, h) = ep_correct(A, prm_P, t, σ; w=w_ratio*h, newton_first, depth, fd=fd_ratio*w_ratio*h,
                                          xtol=xtol_ratio*w_ratio*h, kwargs...)
     t, σ = ep_tangent(A, prm_P0, σ0; fd=fd_ratio*h)
-    P, λ = correct(prm_P0, direction*t, σ, h)
+    seed = nothing
+    while seed === nothing                            # seed correction, h halved on failure as for the steps
+        try
+            seed = correct(prm_P0, direction*t, σ, h)
+        catch err
+            (err isa InterruptException || h/2 < hmin) && rethrow()
+            @debug "seed correction with h = $h failed: $(sprint(showerror, err))"
+            h /= 2
+        end
+    end
+    P, λ = seed
     t_P, λ = ep_tangent(A, P, λ; fd=fd_ratio*h)
     points, λs, tangents = [P], [λ], [sign(t_P ⋅ (direction*t))*t_P]
     status = :max_steps

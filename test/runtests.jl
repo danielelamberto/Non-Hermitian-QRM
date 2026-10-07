@@ -193,6 +193,10 @@ end
             @test all(((P, t),) -> abs(t ⋅ exact_t(P)) > 1 - 1e-8, zip(line.points, line.tangents))
             @test sign(line.tangents[1] ⋅ exact_t(line.points[1])) == direction
         end
+        # the bisection corrector alone (no Newton-first) follows the same line
+        line_nf = track_ep_line(A, P0, λ_EP(P0); h=0.02, nsteps=5, newton_first=false)
+        line_n = track_ep_line(A, P0, λ_EP(P0); h=0.02, nsteps=5)
+        @test maximum(norm.(line_nf.points .- line_n.points)) < 1e-12
         # slice of a non-affine family (generic method): the same matrices as the affine slice
         e1, e2 = plane_basis(P3(0.3, 0.2, 1.0))
         R = Reparametrised(A, ξ -> ξ)

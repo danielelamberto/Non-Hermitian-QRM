@@ -55,7 +55,7 @@ export P2, P3, ParamPath, plane_basis, Circle, Polygon, Segment, velocity, break
 # tracking.jl
 export Eigenpair, eigenpairs_near, pair_near, normalisation, StaleLU, tangent, correct!, track, tracking_succeeded
 # bisection.jl
-export TrackedLine, branch, track_line, pair_midpoint, rect_swaps, ep_bisect
+export TrackedLine, branch, track_line, pair_midpoint, rect_swaps, ep_bisect, disc_fit, ep_bracket
 # scan.jl
 export NodeLabel, TrackedEdge, TrackedGrid, ScanCell, flagged, track_edge, track_grid, tracked_scan, refine_tracked
 # epline.jl

@@ -152,6 +152,17 @@ end
         rect, _, _ = ep_bisect(A_mock, (ep.x - 0.05, ep.x + 0.04, ep.y - 0.06, ep.y + 0.05), targets; depth=10)
         @test rect[1] ≤ ep.x ≤ rect[2] && rect[3] ≤ ep.y ≤ rect[4]
         @test max(rect[2] - rect[1], rect[4] - rect[3]) < 0.01
+        # greedy bracketing (regula falsi on D, 3 × 3 cuts): a certified box of 1e-9 in a few iterations, and the fit of
+        # D on the sides of a small box around the EP points at it
+        rect, hist, _ = ep_bracket(A_mock, (ep.x - 0.05, ep.x + 0.04, ep.y - 0.06, ep.y + 0.05), targets; tol=1e-9)
+        @test rect[1] ≤ ep.x ≤ rect[2] && rect[3] ≤ ep.y ≤ rect[4]
+        @test max(rect[2] - rect[1], rect[4] - rect[3]) ≤ 1e-9 && length(hist) ≤ 9
+        small = (ep.x - 1e-3, ep.x + 1.2e-3, ep.y - 0.9e-3, ep.y + 1.1e-3)
+        c = (P2(small[1], small[3]), P2(small[2], small[3]), P2(small[2], small[4]), P2(small[1], small[4]))
+        lines = [track_line(A_mock, c[1], c[2], targets(c[1])), track_line(A_mock, c[2], c[3], targets(c[2])),
+                 track_line(A_mock, c[4], c[3], targets(c[4])), track_line(A_mock, c[1], c[4], targets(c[1]))]
+        zero, err = disc_fit(lines, small)
+        @test norm(zero - P2(ep.x, ep.y)) < max(3err, 1e-12) && err < 1e-4
         # the corrector of an EP-line tracker: bisection in a tilted plane of the 3D mock (inert z: the EP is a
         # vertical line), on the slice of the family, in the plane's own coordinates (s, t)
         A3 = AffineLiouvillian(prm_P -> mock_matrix(mock_at(prm_P)), 3)

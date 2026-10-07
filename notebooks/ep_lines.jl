@@ -42,19 +42,20 @@ modes_λ(prm_P) = -im .* filter(r -> real(r) > 0, roots_sorted(dimer_at(prm_P)))
 println("Liouvillian dimension ", size(A3.L0, 1))
 
 
-#%% Seeds: the two EPs in the slice g = g0, by bisection
+#%% Seeds: the two EPs in the slice g = g0, by greedy bracketing
 
-# The workflow of the tracker: find the EPs in a 2D slice (here by ep_bisect from a rectangle around each; a
-# tracked_scan of the slice would do the same), then continue each one in 3D. The slice of the family at g = g0 is a
-# two-parameter family in (δω, δγ).
+# The workflow of the tracker: find the EPs in a 2D slice (here by ep_bracket from a rectangle around each: regula
+# falsi on D, bracketed by 3 × 3 cuts, down to a certified box of 1e-9; a tracked_scan of the slice would do the
+# same), then continue each one in 3D. The slice of the family at g = g0 is a two-parameter family in (δω, δγ).
 g0 = 0.04
 A_g0 = slice(A3, P3(0, 0, g0), P3(1, 0, 0), P3(0, 1, 0))
 targets_g0(st) = modes_λ(P3(st[1], st[2], g0))
 seeds = map([1, -1]) do σ                                   # upper (δγ = g0/2) and lower (δγ = -g0/2) EP
     rect0 = (-0.011, 0.009, σ*g0/2 - 0.0081, σ*g0/2 + 0.0113)
-    local t = @elapsed rect, _, lines = ep_bisect(A_g0, rect0, targets_g0; depth=6)
+    local t = @elapsed rect, hist, lines = ep_bracket(A_g0, rect0, targets_g0; tol=1e-9)
     seed = P3((rect[1] + rect[2])/2, (rect[3] + rect[4])/2, g0)
-    println("EP δγ = $(σ*g0/2): bisection box $(round.(rect, digits=5)), $(length(lines)) tracked lines, ",
+    println("EP δγ = $(σ*g0/2): box of size $(round(max(rect[2] - rect[1], rect[4] - rect[3]), sigdigits=2)) at ",
+            round.(seed[1:2], sigdigits=8), " after $(length(hist) - 1) iterations, $(length(lines)) tracked lines, ",
             round(t, digits=1), " s")
     seed
 end

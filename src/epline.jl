@@ -67,28 +67,47 @@ end
 
 Newton iterations on D = 0 for a two-parameter family `A` (e.g. a `slice`), from the point `st0`: Re D = Im D = 0 is
 a 2×2 real system, its Jacobian from central differences of step `fd`. The shift of `pair_near` follows the midpoint
-of the pair. Returns (point, midpoint of the pair there, converged): converged when a step is below `xtol`.
+of the pair. Returns (point, midpoint of the pair there, converged, G): converged when a step is below `xtol`; G, the
+last Jacobian (columns ∇Re D, ∇Im D), gives the local model of the pair (`pair_model`).
 """
 function ep_newton(A, st0::P2, σ; fd, xtol, maxiter=10)
-    st, λm = st0, σ
+    st, λm, G = st0, σ, zeros(2, 2)
     for _ ∈ 1:maxiter
         G, λm = disc_gradient(A, st, λm; fd)
         D, λm = pair_disc(A, st, λm)
         δ = -(transpose(G) \ reim_vec(D))                   # the Jacobian's rows are ∇Re D, ∇Im D
         st += δ
-        norm(δ) < xtol && return st, pair_disc(A, st, λm)[2], true
+        norm(δ) < xtol && return st, pair_disc(A, st, λm)[2], true, G
     end
-    return st, λm, false
+    return st, λm, false, G
+end
+
+"""
+    pair_model(st, λm, G)
+
+The pair predicted near its EP `st` (coalesced eigenvalue `λm`, Jacobian `G` of (Re D, Im D) from `ep_newton`): the
+function x ↦ [λm + √D(x)/2, λm - √D(x)/2] with D(x) ≈ ∇Re D⋅(x - st) + i ∇Im D⋅(x - st). Targets for the pair's
+eigenvalues at x: unlike the two eigenvalues nearest λm, they stay on the right pair when another eigenvalue lies within
+the pair's splitting √|D(x)| (crowded spectra).
+"""
+function pair_model(st, λm, G)
+    return x -> (D = (x - st) ⋅ G[:, 1] + im*((x - st) ⋅ G[:, 2]); [λm + sqrt(D)/2, λm - sqrt(D)/2])
 end
 
 """
     pair_swaps(A, q, σ; kwargs...)
+    pair_swaps(A, q, targets; kwargs...)
 
-Whether following the two eigenvalues of `A` nearest `σ` once around the loop `q` swaps them (an odd number of their
-EPs inside). `kwargs` are passed to `track`; a tracking that fails counts as no swap.
+Whether following a pair of eigenvalues of `A` once around the loop `q` swaps them (an odd number of their EPs inside):
+the two eigenvalues nearest `σ` at the start of q, or those nearest the two `targets` (shift offset 1% of their
+separation). `kwargs` are passed to `track`; a tracking that fails counts as no swap.
 """
-function pair_swaps(A, q::ParamPath, σ; kwargs...)
-    pairs = pair_near(A(position(q, 0.0)), σ)
+pair_swaps(A, q::ParamPath, σ::Number; kwargs...) = swaps_from(A, q, pair_near(A(position(q, 0.0)), σ); kwargs...)
+function pair_swaps(A, q::ParamPath, targets::AbstractVector; kwargs...)
+    pairs = eigenpairs_near(A(position(q, 0.0)), targets; δσ=0.01*abs(targets[1] - targets[2]))
+    return swaps_from(A, q, pairs; kwargs...)
+end
+function swaps_from(A, q, pairs; kwargs...)
     sols = [first(track(A, q, λ0, r0; kwargs...)) for (λ0, r0) ∈ pairs]
     all(tracking_succeeded, sols) || return false
     λ_end = sols[1].u[end][end]
@@ -96,69 +115,91 @@ function pair_swaps(A, q::ParamPath, σ; kwargs...)
 end
 
 """
-    ep_correct(A, prm_P, t, σ; w, newton_first=true, depth=4, fd=1e-3w, xtol=1e-8w, kwargs...)
+    ep_correct(A, prm_P, t, σ; w, newton_first=true, loop_ratio=1/16, greedy=true, depth=4, fd=1e-3w, xtol=1e-8w,
+               kwargs...)
 
 Corrector of the EP-line tracker: the EP in the plane through `prm_P` normal to `t` (3D), near the eigenvalue `σ`, on
 the `slice` of `A` in that plane.
 - `newton_first`: `ep_newton` from prm_P itself, accepted if it converges within the distance `w` of prm_P and a
-  circle of radius w/2 around the result swaps the pair (`pair_swaps`: an EP of this pair inside, so the same line).
-  Cheap: two tracked loops instead of a bisection's lines.
-- Otherwise, or if that fails: `ep_bisect` from a square of half-width `w` around prm_P, slightly off-centre (it must
-  swap the pair: one EP inside), `depth` levels, then `ep_newton` from the centre of the final rectangle, which must
-  converge within that rectangle (up to half its size).
-`kwargs` are passed to `track`. Throws if the bisection fails. Returns (EP, midpoint of the pair there).
+  circle of radius `loop_ratio*w` around the result swaps the pair (`pair_swaps`: an EP of this pair inside). Cheap:
+  two tracked loops instead of a bracketing's lines. The loop only has to enclose Newton's point (error ~ xtol), and
+  must not enclose another EP involving one of the pair's eigenvalues (e.g. neighbouring lines of the QRM tower, which
+  all meet at g = 0): a loop of w/2 there cycles four eigenvalues instead of swapping two. Hence a small radius; the
+  cost of tracking a loop near an EP does not depend on its size (the √ structure is scale invariant). The pair is picked at the start of the loop, and at the
+  corners of the bracketing below, from the local model of Newton (`pair_model`), not as the two eigenvalues nearest
+  σ, which fails in crowded spectra.
+- Otherwise, or if that fails, a bracketing from a square of half-width `w` around prm_P, slightly off-centre (it must
+  swap the pair: one EP inside): `ep_bracket` down to a rectangle of size 1e-2 w if `greedy`, else `ep_bisect` with
+  `depth` levels. Then `ep_newton` from the centre of the final rectangle, which must converge within it (up to half
+  its size).
+`kwargs` are passed to `track`. Throws if the bracketing fails. Returns (EP, midpoint of the pair there, the path
+taken: `:newton` or `:bracket`).
 """
-function ep_correct(A, prm_P::P3, t::P3, σ; w, newton_first=true, depth=4, fd=1e-3w, xtol=1e-8w, kwargs...)
+function ep_correct(A, prm_P::P3, t::P3, σ; w, newton_first=true, loop_ratio=1/16, greedy=true, depth=4, fd=1e-3w,
+                    xtol=1e-8w, kwargs...)
     e1, e2 = plane_basis(t)
     A_sl = slice(A, prm_P, e1, e2)
-    if newton_first
-        try
-            st, λm, converged = ep_newton(A_sl, P2(0, 0), σ; fd, xtol)
-            converged && norm(st) ≤ w && pair_swaps(A_sl, Circle(st, w/2), λm; kwargs...) &&
-                return prm_P + st[1]*e1 + st[2]*e2, λm
-        catch err
-            err isa InterruptException && rethrow()
-            @debug "Newton-first corrector failed: $(sprint(showerror, err))"
+    # Newton from prm_P: accepted as the correction (`newton_first`) if it converges within w and a loop around it swaps
+    # the pair; in any case its local model of the pair gives the targets of the loop and of the bracketing's corners
+    model, σ_EP = nothing, σ
+    try
+        st, λm, converged, G = ep_newton(A_sl, P2(0, 0), σ; fd, xtol)
+        if norm(st) ≤ 2w && all(isfinite, G)
+            model, σ_EP = pair_model(st, λm, G), λm
+            if newton_first
+                loop = Circle(st, loop_ratio*w)
+                swaps = converged && norm(st) ≤ w && pair_swaps(A_sl, loop, model(position(loop, 0.0)); kwargs...)
+                swaps && return prm_P + st[1]*e1 + st[2]*e2, λm, :newton
+                @debug "Newton-first rejected: converged = $converged, |st|/w = $(norm(st)/w), loop swaps = $swaps"
+            end
         end
+    catch err
+        err isa InterruptException && rethrow()
+        @debug "Newton from the predicted point failed: $(sprint(showerror, err))"
     end
-    targets(st) = first.(pair_near(A_sl(st), σ))
+    targets = model === nothing ? (st -> first.(pair_near(A_sl(st), σ))) : model
     # off-centre by a generic fraction of w: with a good predictor the EP is near prm_P, which must not lie on the
-    # first dividing lines of the bisection (the midlines of the square)
+    # first cuts (the midlines of the square for the bisection)
     a, b = 0.1373w, 0.0719w
-    (x0, x1, y0, y1), _, _ = ep_bisect(A_sl, (a - w, a + w, b - w, b + w), targets; depth, kwargs...)
-    st, λm, converged = ep_newton(A_sl, P2((x0 + x1)/2, (y0 + y1)/2), σ; fd, xtol)
-    converged || error("Newton on D did not converge from the bisection's rectangle")
+    square = (a - w, a + w, b - w, b + w)
+    (x0, x1, y0, y1), _, _ = greedy ? ep_bracket(A_sl, square, targets; tol=1e-2w, kwargs...) :
+                                      ep_bisect(A_sl, square, targets; depth, kwargs...)
+    st, λm, converged = ep_newton(A_sl, P2((x0 + x1)/2, (y0 + y1)/2), σ_EP; fd=min(fd, (x1 - x0)/10), xtol)
+    converged || error("Newton on D did not converge from the bracketing rectangle")
     hx, hy = (x1 - x0)/2, (y1 - y0)/2
-    (x0 - hx ≤ st[1] ≤ x1 + hx && y0 - hy ≤ st[2] ≤ y1 + hy) || error("Newton on D left the bisection's rectangle")
-    return prm_P + st[1]*e1 + st[2]*e2, λm
+    (x0 - hx ≤ st[1] ≤ x1 + hx && y0 - hy ≤ st[2] ≤ y1 + hy) || error("Newton on D left the bracketing rectangle")
+    return prm_P + st[1]*e1 + st[2]*e2, λm, :bracket
 end
 
 """
     EPLine
 
 A tracked line of EP2s: the `points` (3D), the coalesced eigenvalue `λs` there (midpoint of the pair), the unit
-`tangents` (oriented along the tracking), and the `status` that ended the tracking: `:max_steps`, `:left_bounds` (the
+`tangents` (oriented along the tracking), the `status` that ended the tracking: `:max_steps`, `:left_bounds` (the
 last point is the first one outside), `:closed` (back near the first point, same direction), `:step_too_small` (the
 corrector failed down to `hmin`: the line may end at a higher-order point, or leave the region where the pair is
-found).
+found), and `counts` of the corrections: `newton` and `bracket` (successful corrections, by the path of `ep_correct`,
+including the seed and steps then rejected for turning), `failed` (the corrector threw) and `turned` (steps rejected:
+the tangent turned by more than θmax).
 """
 struct EPLine
     points::Vector{P3}
     λs::Vector{ComplexF64}
     tangents::Vector{P3}
     status::Symbol
+    counts::NamedTuple{(:newton, :bracket, :failed, :turned),NTuple{4,Int}}
 end
 
 """
     track_ep_line(A, prm_P0, σ0; h, direction=1, nsteps=200, hmin=h/64, hmax=4h, w_ratio=0.5, θmax=0.15,
-                  bounds=nothing, newton_first=true, depth=4, fd_ratio=1e-3, xtol_ratio=1e-8, kwargs...)
+                  bounds=nothing, newton_first=true, greedy=true, depth=4, fd_ratio=1e-3, xtol_ratio=1e-8, kwargs...)
 
 Follows the line of EP2s of the three-parameter family `A` through `prm_P0`, an approximate EP (e.g. from a scan or
 `ep_bisect` in a 2D slice, mapped to 3D) whose coalesced eigenvalue is near `σ0`. Returns an `EPLine`.
 - Seed: the tangent at prm_P0, oriented by `direction` (±1: call twice for both halves of the line), then the
   corrector in the plane through prm_P0 normal to it.
 - Step: predictor P + h t, corrector `ep_correct` within the distance `w_ratio*h` (the prediction error, ~ θ h/2 for
-  a turn θ per step, must stay well inside it; `newton_first` and `depth` are passed to it), new tangent
+  a turn θ per step, must stay well inside it; `newton_first`, `greedy` and `depth` are passed to it), new tangent
   ∇Re D × ∇Im D there.
 - Step control: a step whose corrector fails, or whose tangent turns by more than `θmax` (radians), is rejected and h
   halved; after a step turning by less than θmax/3, h grows by 1.5, up to `hmax`.
@@ -168,9 +209,15 @@ Follows the line of EP2s of the three-parameter family `A` through `prm_P0`, an 
   below `xtol_ratio` times the box half-width. `kwargs` are passed to `track` (bisection lines).
 """
 function track_ep_line(A, prm_P0::P3, σ0; h, direction=1, nsteps=200, hmin=h/64, hmax=4h, w_ratio=0.5, θmax=0.15,
-                       bounds=nothing, newton_first=true, depth=4, fd_ratio=1e-3, xtol_ratio=1e-8, kwargs...)
-    correct(prm_P, t, σ, h) = ep_correct(A, prm_P, t, σ; w=w_ratio*h, newton_first, depth, fd=fd_ratio*w_ratio*h,
-                                         xtol=xtol_ratio*w_ratio*h, kwargs...)
+                       bounds=nothing, newton_first=true, greedy=true, depth=4, fd_ratio=1e-3, xtol_ratio=1e-8,
+                       kwargs...)
+    counts = Dict(:newton => 0, :bracket => 0, :failed => 0, :turned => 0)
+    function correct(prm_P, t, σ, h)
+        Q, λQ, path = ep_correct(A, prm_P, t, σ; w=w_ratio*h, newton_first, greedy, depth, fd=fd_ratio*w_ratio*h,
+                                 xtol=xtol_ratio*w_ratio*h, kwargs...)
+        counts[path] += 1
+        return Q, λQ
+    end
     t, σ = ep_tangent(A, prm_P0, σ0; fd=fd_ratio*h)
     seed = nothing
     while seed === nothing                            # seed correction, h halved on failure as for the steps
@@ -179,6 +226,7 @@ function track_ep_line(A, prm_P0::P3, σ0; h, direction=1, nsteps=200, hmin=h/64
         catch err
             (err isa InterruptException || h/2 < hmin) && rethrow()
             @debug "seed correction with h = $h failed: $(sprint(showerror, err))"
+            counts[:failed] += 1
             h /= 2
         end
     end
@@ -201,11 +249,13 @@ function track_ep_line(A, prm_P0::P3, σ0; h, direction=1, nsteps=200, hmin=h/64
         catch err
             err isa InterruptException && rethrow()
             @debug "step h = $h from $P failed: $(sprint(showerror, err))"
+            counts[:failed] += 1
             h /= 2
             continue
         end
         θ = acos(clamp(t_Q ⋅ t, -1, 1))
         if θ > θmax
+            counts[:turned] += 1
             h /= 2
             continue
         end
@@ -220,5 +270,5 @@ function track_ep_line(A, prm_P0::P3, σ0; h, direction=1, nsteps=200, hmin=h/64
         end
         θ < θmax/3 && (h = min(1.5h, hmax))
     end
-    return EPLine(points, λs, tangents, status)
+    return EPLine(points, λs, tangents, status, (; (k => counts[k] for k ∈ (:newton, :bracket, :failed, :turned))...))
 end

@@ -137,13 +137,15 @@ function fill_bordered!(P::BorderedPattern, L, λ, r, c)
 end
 
 """
-    StaleLU(; rtol=1e-12, maxiter=20, early=8)
+    StaleLU(; rtol=1e-12, maxiter=20, early=8, method=:gmres)
 
 Solver for the bordered systems of one tracked eigenpair (not to be shared between threads). B depends on (u, λ, r) but
 changes little along a path: B x = b is solved with the LU factorisation F of an earlier B ("stale"), refined by
 x ← x + F \\ (b - B x) until ‖b - B x‖ ≤ rtol ‖b‖. It refactorises with the current B when the refinement does not
 converge within `maxiter` iterations or stops decreasing, and after any solve that needed more than `early` iterations
-(B has drifted: keep the next solves cheap). Counts `factorisations` and `refinements`.
+(B has drifted: keep the next solves cheap). Counts `factorisations` and `refinements` (iterations).
+`method=:gmres` (default): GMRES preconditioned by F instead of the refinement (a Richardson iteration on the same
+splitting, `method=:richardson`), which still converges when ‖I - B F⁻¹‖ ≳ 1, as near an EP where B is ill-conditioned.
 
 The matrix B (a `BorderedPattern`, rebuilt only if r or c leaves its support) and the work vectors are allocated once
 and reused; refactorisations on the same pattern reuse the symbolic analysis of the LU (`lu!`).
@@ -158,11 +160,19 @@ mutable struct StaleLU
     rtol::Float64
     maxiter::Int
     early::Int
+    method::Symbol            # :gmres (GMRES preconditioned by F) or :richardson (iterative refinement)
+    V::Matrix{ComplexF64}     # GMRES workspace: Krylov basis (n + 1) × (maxiter + 1),
+    H::Matrix{ComplexF64}     # Hessenberg matrix, rotated to triangular,
+    g::Vector{ComplexF64}     # rotated right-hand side,
+    cs::Vector{Float64}       # Givens rotations (cosines,
+    sn::Vector{ComplexF64}    # sines)
     factorisations::Int
     refinements::Int
 end
-StaleLU(; rtol=1e-12, maxiter=20, early=8) =
-    StaleLU(nothing, nothing, ComplexF64[], ComplexF64[], ComplexF64[], ComplexF64[], rtol, maxiter, early, 0, 0)
+StaleLU(; rtol=1e-12, maxiter=20, early=8, method=:gmres) =
+    StaleLU(nothing, nothing, ComplexF64[], ComplexF64[], ComplexF64[], ComplexF64[], rtol, maxiter, early, method,
+            Matrix{ComplexF64}(undef, 0, 0), zeros(ComplexF64, maxiter + 1, maxiter), zeros(ComplexF64, maxiter + 1),
+            zeros(maxiter), zeros(ComplexF64, maxiter), 0, 0)
 
 """
     rhs_buffer(S::StaleLU, n)
@@ -170,7 +180,10 @@ StaleLU(; rtol=1e-12, maxiter=20, early=8) =
 The right-hand-side work vector of `S`, for an eigenvector of length `n` (sizes the work vectors at the first call).
 """
 function rhs_buffer(S::StaleLU, n)
-    length(S.b) == n + 1 || foreach(v -> resize!(v, n + 1), (S.b, S.x, S.res, S.dx))
+    if length(S.b) != n + 1
+        foreach(v -> resize!(v, n + 1), (S.b, S.x, S.res, S.dx))
+        S.method == :gmres && (S.V = Matrix{ComplexF64}(undef, n + 1, S.maxiter + 1))
+    end
     return S.b
 end
 
@@ -202,6 +215,7 @@ function solve_bordered!(S::StaleLU, L, λ, r, c, b)
     fresh && refactorise!(S, L, λ, r, c)
     ldiv!(S.x, S.F, b)
     fresh && return S.x
+    S.method == :gmres && return gmres_bordered!(S, L, λ, r, c, b)
     nb, res_prev = norm(b), Inf
     for it ∈ 0:S.maxiter
         S.res .= b .- bordered_mul!(S.res, L, λ, r, c, S.x)
@@ -219,6 +233,54 @@ function solve_bordered!(S::StaleLU, L, λ, r, c, b)
     return ldiv!(S.x, S.F, b)
 end
 solve_bordered!(::Nothing, L, λ, r, c, b) = bordered(L, λ, r, c) \ b
+
+# GMRES on B x = b, right-preconditioned by the stale factorisation F (x = F⁻¹z), from x0 = F⁻¹b (in S.x): converges
+# in a few iterations where iterative refinement (a Richardson iteration on the same splitting) diverges, i.e. when
+# ‖I - B F⁻¹‖ ≳ 1 near an EP. Least squares by Givens rotations, updated at each iteration; workspace in S (no
+# allocation). Refactorises if not converged within maxiter, or after more than `early` iterations.
+function gmres_bordered!(S::StaleLU, L, λ, r, c, b)
+    nb = norm(b)
+    bordered_mul!(S.res, L, λ, r, c, S.x)
+    S.res .= b .- S.res
+    β = norm(S.res)
+    β ≤ S.rtol*nb && return S.x
+    V, H, g, cs, sn, w = S.V, S.H, S.g, S.cs, S.sn, S.dx
+    @views V[:, 1] .= S.res ./ β
+    fill!(g, 0)
+    g[1] = β
+    for j ∈ 1:S.maxiter
+        @views ldiv!(S.res, S.F, V[:, j])                     # S.res: work vector here
+        bordered_mul!(w, L, λ, r, c, S.res)
+        for i ∈ 1:j                                           # modified Gram–Schmidt
+            @views H[i, j] = V[:, i] ⋅ w
+            @views w .-= H[i, j] .* V[:, i]
+        end
+        hn = norm(w)
+        @views V[:, j + 1] .= w ./ hn
+        for i ∈ 1:j - 1                                       # previous rotations on the new column
+            hi = H[i, j]
+            H[i, j] = cs[i]*hi + sn[i]*H[i + 1, j]
+            H[i + 1, j] = -conj(sn[i])*hi + cs[i]*H[i + 1, j]
+        end
+        ρ = hypot(abs(H[j, j]), hn)                           # new rotation, zeroing hn below H[j, j]
+        cs[j] = abs(H[j, j])/ρ
+        sn[j] = (iszero(H[j, j]) ? one(ComplexF64) : H[j, j]/abs(H[j, j]))*hn/ρ     # [c s; -s̄ c][H[j, j]; hn] = [·; 0]
+        H[j, j] = cs[j]*H[j, j] + sn[j]*hn
+        g[j + 1] = -conj(sn[j])*g[j]
+        g[j] = cs[j]*g[j]
+        S.refinements += 1
+        if abs(g[j + 1]) ≤ S.rtol*nb
+            y = UpperTriangular(view(H, 1:j, 1:j)) \ view(g, 1:j)
+            @views mul!(S.res, V[:, 1:j], y)
+            ldiv!(w, S.F, S.res)
+            S.x .+= w
+            j > S.early && refactorise!(S, L, λ, r, c)
+            return S.x
+        end
+    end
+    refactorise!(S, L, λ, r, c)
+    return ldiv!(S.x, S.F, b)
+end
 
 ## Predictor–corrector tracking along a path
 
@@ -265,28 +327,40 @@ function correct!(r, L::SparseMatrixCSC, λ, c; tol=1e-12, maxiter=5, solver=not
 end
 
 """
-    track(A, p::ParamPath, λ0, r0; alg=Vern7(lazy=false), reltol=1e-10, abstol=1e-12, corrector=true, tol=1e-12,
-          reset_cos=0.1, stale=true, tspan=(0.0, 1.0), kwargs...)
+    track(A, p::ParamPath, λ0, r0; alg=Tsit5(), reltol=1e-6, abstol=1e-8, corrector=true, tol=1e-12, reset_cos=0.1,
+          stale=true, gmres=true, tspan=(0.0, 1.0), kwargs...)
 
 Follows the eigenpair (λ0, r0) of `A` (an `AffineLiouvillian`, or any family with its interface: see affine.jl)
 along the path `p`, by integrating d[r; λ]/du = `tangent` over `tspan` (default: the whole path) with the path's
 breakpoints as tstops.
 Returns `(sol, diagnostics)`: λ(u) = sol(u)[end], r(u) = sol(u)[1:end-1].
+- `alg`, `reltol`, `abstol`: the ODE solver. The corrector puts every step back on an exact eigenpair, so the
+  integrator only has to stay in Newton's basin and on the right branch: Tsit5 at 1e-6 (2.5–4× faster than Vern7 at
+  1e-10, the former default, on loops, lines and scans; scans became wrong at 1e-4). The values at the steps
+  (sol.t, sol.u) are exact eigenpairs (to `tol`: the corrector overwrites the saved step); the dense output sol(u)
+  between them is accurate to ~reltol, and less near an EP. For an
+  accurate dense output, `alg=Vern7(lazy=false), reltol=1e-10, abstol=1e-12`; `alg=EulerNewton()` is a hand-written
+  predictor–corrector continuation (see there).
 - `corrector`: Newton correction (`correct!`) after every accepted step, and reset of c to `normalisation(r)` when
   cos∠(c, r) = 1/(‖c‖‖r‖) < `reset_cos` (c'r = 1 is kept, r unchanged; ‖r‖ would grow otherwise).
-- `stale`: bordered systems solved with a `StaleLU` (false: a fresh factorisation at every solve).
+- `stale`: bordered systems solved with a `StaleLU` (false: a fresh factorisation at every solve); `gmres`: by GMRES
+  preconditioned by the stale factorisation (false: iterative refinement, which refactorises much more often near an
+  EP: ~2 factorisations per tracking instead of 50–250, 6–11× faster on 200–625 states, but slower on very small
+  matrices, ~20 states, where a factorisation costs less than the Krylov iterations).
 - `diagnostics`: corrections, Newton iterations, largest residual before a correction, c resets, factorisations,
-  refinements.
+  refinements (GMRES or refinement iterations).
 
 L(u) and dL/du are written in place into two `work_matrix(A)` owned by this call (they share only A's read-only index
-arrays), so concurrent calls on the same `A` are independent. c is the ODE parameter, reset in place by the callback: the solver must not interpolate lazily
-(`Vern7(lazy=false)`), lazy stages would be computed when sol(u) is called, with the latest c.
+arrays), so concurrent calls on the same `A` are independent. c is the ODE parameter, reset in place by the callback:
+the solver must not interpolate lazily (Vern7 needs `lazy=false`: its lazy stages would be computed when sol(u) is
+called, with the latest c; Tsit5's interpolant uses only the stages of the step).
 """
-function track(A, p::ParamPath, λ0, r0; alg=Vern7(lazy=false), reltol=1e-10, abstol=1e-12,
-               corrector=true, tol=1e-12, reset_cos=0.1, stale=true, tspan=(0.0, 1.0), kwargs...)
+function track(A, p::ParamPath, λ0, r0; alg=Tsit5(), reltol=1e-6, abstol=1e-8, corrector=true, tol=1e-12,
+               reset_cos=0.1, stale=true, gmres=true, tspan=(0.0, 1.0), kwargs...)
+    alg isa EulerNewton && return track_continuation(A, p, λ0, r0, alg; tol, reset_cos, stale, gmres, tspan)
     n = length(r0)
     c = normalisation(r0)
-    solver = stale ? StaleLU() : nothing
+    solver = stale ? StaleLU(method=gmres ? :gmres : :richardson) : nothing
     L, dL = evaluate!(work_matrix(A), A, position(p, tspan[1])), work_matrix(A)     # dL: filled by rhs!
     function rhs!(dy, y, c, u)
         evaluate!(L, A, position(p, u))
@@ -303,6 +377,8 @@ function track(A, p::ParamPath, λ0, r0; alg=Vern7(lazy=false), reltol=1e-10, ab
         r = view(integ.u, 1:n)
         λ, res0, it = correct!(r, evaluate!(L, A, position(p, integ.t)), integ.u[n + 1], c; tol, solver)
         integ.u[n + 1] = λ
+        # the step was saved before this callback: store the corrected eigenpair there instead (sol.u exact)
+        isempty(integ.sol.t) || integ.sol.t[end] != integ.t || (integ.sol.u[end] .= integ.u)
         if 1/(norm(c)*norm(r)) < reset_cos
             c .= normalisation(r)
             diagnostics.resets[] += 1
@@ -318,6 +394,135 @@ function track(A, p::ParamPath, λ0, r0; alg=Vern7(lazy=false), reltol=1e-10, ab
     sol = solve(prob, alg; reltol, abstol, tstops=filter(u -> tspan[1] < u < tspan[2], breakpoints(p)), callback, kwargs...)
     lu_counts = stale ? (factorisations=solver.factorisations, refinements=solver.refinements) : (factorisations=-1, refinements=0)
     return sol, merge(map(getindex, diagnostics), lu_counts)
+end
+
+## Euler–Newton continuation (alternative to the ODE solver)
+
+"""
+    EulerNewton(; α=0.1, h0=0.01, hmin=1e-10, hmax=0.1, maxiter=4)
+
+Predictor–corrector continuation for `track` (pass `alg=EulerNewton()`), as in continuation codes (AUTO, MATCONT):
+Euler predictor along the tangent, Newton corrector (`correct!`, at most `maxiter` iterations) at the new point, one
+bordered solve per tangent and per Newton iteration (stale LU). A step is accepted if Newton converges and the
+corrector's displacement is at most `α` times the predictor's (‖y - y_pred‖ ≤ α ‖y_pred - y_prev‖, y = [r; λ]): this
+ratio grows like the curvature of the eigenpair path times h, so it resolves the √ behaviour near an EP (h ≲ α ×
+distance) without an error tolerance. A displacement below 1e-10 (1 + ‖y‖) is always accepted (an eigenpair that does
+not move). Rejected steps are halved; after an accepted one, h is scaled by (α/ratio)^(1/p) ∈ [1/2, 2] (p = 1). With
+`quadratic`, the predictor adds h²/2 y'' with y'' from the last two tangents: the ratio then grows like h² (p = 2).
+Step sizes in units of the path parameter u ∈ [0, 1], from `h0`, between `hmin` and `hmax`. A step that keeps failing
+the curvature check below `hleap` is at a singular point of the path (an EP it crosses, e.g. a line of real-axis
+EPs, where the eigenvalue goes like √u): the tracker then leaps over it by 100 hleap,
+and continues from the eigenpair nearest the last eigenvalue there (shift-invert; counted in `leaps`), as an ODE
+solver stepping across would.
+"""
+Base.@kwdef struct EulerNewton
+    α::Float64 = 0.1
+    h0::Float64 = 0.01
+    hmin::Float64 = 1e-10
+    hmax::Float64 = 0.1
+    maxiter::Int = 4
+    quadratic::Bool = false
+    hleap::Float64 = 1e-6
+end
+
+"""
+    ContinuationSolution
+
+The result of `track` with `EulerNewton`: steps `t`, states `u` ([r; λ] at each step), their derivatives `du`, a cubic
+Hermite interpolant (call it with u), `retcode` (`:Success` or `:Failure`) and `stats` (`naccept`, `nreject`, `nf`:
+bordered solves). It mirrors the parts of an ODE solution that the package uses.
+"""
+struct ContinuationSolution
+    t::Vector{Float64}
+    u::Vector{Vector{ComplexF64}}
+    du::Vector{Vector{ComplexF64}}
+    retcode::Symbol
+    stats::NamedTuple{(:naccept, :nreject, :nf),NTuple{3,Int}}
+end
+function (s::ContinuationSolution)(x)
+    t = s.t
+    k = clamp(searchsortedlast(t, x), 1, length(t) - 1)
+    length(t) == 1 && return copy(s.u[1])
+    h = t[k + 1] - t[k]
+    θ = (x - t[k])/h
+    h00, h10, h01, h11 = 2θ^3 - 3θ^2 + 1, θ^3 - 2θ^2 + θ, -2θ^3 + 3θ^2, θ^3 - θ^2
+    return h00*s.u[k] + h10*h*s.du[k] + h01*s.u[k + 1] + h11*h*s.du[k + 1]
+end
+
+function track_continuation(A, p::ParamPath, λ0, r0, alg::EulerNewton; tol=1e-12, reset_cos=0.1, stale=true,
+                            gmres=true, tspan=(0.0, 1.0))
+    n = length(r0)
+    c = normalisation(r0)
+    solver = stale ? StaleLU(method=gmres ? :gmres : :richardson) : nothing
+    L, dL = work_matrix(A), work_matrix(A)
+    function tangent_at(u, r, λ)
+        evaluate!(L, A, position(p, u))
+        derivative!(dL, A, position(p, u), velocity(p, u))
+        dr, dλ = tangent(L, dL, λ, r, c; solver)
+        return [dr; dλ]
+    end
+    u, r, λ = tspan[1], copy(ComplexF64.(r0)), ComplexF64(λ0)
+    ts, ys, dys = [u], [[r; λ]], [tangent_at(u, r, λ)]
+    stops = sort(filter(b -> tspan[1] < b < tspan[2], breakpoints(p)))
+    h, nreject, nf, iterations, max_res, resets, leaps = alg.h0, 0, 1, 0, 0.0, 0, 0
+    leapt_from = NaN                                          # one leap attempt per point
+    retcode = :Success
+    while u < tspan[2]
+        next_stop = something(findfirst(>(u + 1e-14), stops), 0)
+        u_end = next_stop == 0 ? tspan[2] : stops[next_stop]
+        h = min(h, u_end - u)
+        dy = dys[end]
+        yp = [r; λ] .+ h .* dy
+        if alg.quadratic && length(ts) ≥ 2                    # y'' from the last two tangents
+            yp .+= (h^2/2/(ts[end] - ts[end - 1])) .* (dy .- dys[end - 1])
+        end
+        rp, λp = yp[1:n], yp[n + 1]
+        evaluate!(L, A, position(p, u + h))
+        rc = copy(rp)
+        λc, res0, it = correct!(rc, L, λp, c; tol, maxiter=alg.maxiter, solver)
+        nf += it
+        res = norm(L*rc .- λc .* rc)/norm(rc)
+        dist = sqrt(norm(rc .- rp)^2 + abs2(λc - λp))
+        floor_ = 1e-10*(1 + sqrt(norm(r)^2 + abs2(λ)))
+        ratio = dist ≤ floor_ ? 0.0 : dist/(h*norm(dy))
+        converged = res ≤ 10tol && abs(c ⋅ rc - 1) ≤ 10tol
+        if !converged || !(ratio ≤ alg.α)
+            nreject += 1
+            h /= 2
+            if h < alg.hleap && u != leapt_from
+                # stuck at a singular point of the path (an EP it crosses, e.g. a line of real-axis EPs, where the
+                # eigenvalue goes like √u): restart just beyond it from the eigenpair nearest λ (shift-invert, offset
+                # by a tiny imaginary part to pick one branch of a conjugate pair deterministically)
+                leapt_from = u
+                h = min(100*alg.hleap, u_end - u)
+                evaluate!(L, A, position(p, u + h))
+                λc, rc = only(eigenpairs_near(L, [λ]; δσ=1e-9im*(1 + abs(λ))))
+                rc ./= c ⋅ rc
+                leaps += 1
+            elseif h < alg.hmin
+                retcode = :Failure
+                break
+            else
+                continue
+            end
+        end
+        u = h == u_end - u ? u_end : u + h
+        r, λ = rc, λc
+        iterations += it
+        max_res = max(max_res, res0)
+        if 1/(norm(c)*norm(r)) < reset_cos
+            c = normalisation(r)
+            resets += 1
+        end
+        push!(ts, u); push!(ys, [r; λ]); push!(dys, tangent_at(u, r, λ))
+        nf += 1
+        h = clamp(h*(alg.α/max(ratio, 1e-12))^(alg.quadratic ? 1/2 : 1), h/2, 2h)
+        h = min(h, alg.hmax)
+    end
+    sol = ContinuationSolution(ts, ys, dys, retcode, (naccept=length(ts) - 1, nreject=nreject, nf=nf))
+    lu_counts = stale ? (factorisations=solver.factorisations, refinements=solver.refinements) : (factorisations=-1, refinements=0)
+    return sol, (corrections=length(ts) - 1, iterations=iterations, max_residual=max_res, resets=resets, leaps=leaps,
+                 lu_counts...)
 end
 
 """

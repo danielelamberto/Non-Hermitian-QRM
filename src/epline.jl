@@ -115,8 +115,8 @@ function swaps_from(A, q, pairs; kwargs...)
 end
 
 """
-    ep_correct(A, prm_P, t, σ; w, newton_first=true, loop_ratio=1/16, greedy=true, depth=4, fd=1e-3w, xtol=1e-8w,
-               kwargs...)
+    ep_correct(A, prm_P, t, σ; w, newton_first=true, loop_ratio=1/16, carry=nothing, greedy=true, depth=4, fd=1e-3w,
+               xtol=1e-8w, kwargs...)
 
 Corrector of the EP-line tracker: the EP in the plane through `prm_P` normal to `t` (3D), near the eigenvalue `σ`, on
 the `slice` of `A` in that plane.
@@ -125,18 +125,21 @@ the `slice` of `A` in that plane.
   two tracked loops instead of a bracketing's lines. The loop only has to enclose Newton's point (error ~ xtol), and
   must not enclose another EP involving one of the pair's eigenvalues (e.g. neighbouring lines of the QRM tower, which
   all meet at g = 0): a loop of w/2 there cycles four eigenvalues instead of swapping two. Hence a small radius; the
-  cost of tracking a loop near an EP does not depend on its size (the √ structure is scale invariant). The pair is picked at the start of the loop, and at the
-  corners of the bracketing below, from the local model of Newton (`pair_model`), not as the two eigenvalues nearest
-  σ, which fails in crowded spectra.
+  cost of tracking a loop near an EP does not depend on its size (the √ structure is scale invariant). The loop and
+  its starting pair come from `check_loop`: with `carry` (the pair at the previous loop's start), the pair is tracked
+  from there, so that it is the same pair by continuation; otherwise, it is picked from the local model of Newton
+  (`pair_model`), as at the corners of the bracketing below, not as the two eigenvalues nearest σ, which fails in
+  crowded spectra.
 - Otherwise, or if that fails, a bracketing from a square of half-width `w` around prm_P, slightly off-centre (it must
   swap the pair: one EP inside): `ep_bracket` down to a rectangle of size 1e-2 w if `greedy`, else `ep_bisect` with
   `depth` levels. Then `ep_newton` from the centre of the final rectangle, which must converge within it (up to half
   its size).
 `kwargs` are passed to `track`. Throws if the bracketing fails. Returns (EP, midpoint of the pair there, the path
-taken: `:newton` or `:bracket`).
+taken: `:newton` or `:bracket`, the check loop's start and pair `(x, pairs)` to carry to the next step or `nothing`,
+whether the pair was carried).
 """
-function ep_correct(A, prm_P::P3, t::P3, σ; w, newton_first=true, loop_ratio=1/16, greedy=true, depth=4, fd=1e-3w,
-                    xtol=1e-8w, kwargs...)
+function ep_correct(A, prm_P::P3, t::P3, σ; w, newton_first=true, loop_ratio=1/16, carry=nothing, greedy=true,
+                    depth=4, fd=1e-3w, xtol=1e-8w, kwargs...)
     e1, e2 = plane_basis(t)
     A_sl = slice(A, prm_P, e1, e2)
     # Newton from prm_P: accepted as the correction (`newton_first`) if it converges within w and a loop around it swaps
@@ -146,11 +149,15 @@ function ep_correct(A, prm_P::P3, t::P3, σ; w, newton_first=true, loop_ratio=1/
         st, λm, converged, G = ep_newton(A_sl, P2(0, 0), σ; fd, xtol)
         if norm(st) ≤ 2w && all(isfinite, G)
             model, σ_EP = pair_model(st, λm, G), λm
-            if newton_first
-                loop = Circle(st, loop_ratio*w)
-                swaps = converged && norm(st) ≤ w && pair_swaps(A_sl, loop, model(position(loop, 0.0)); kwargs...)
-                swaps && return prm_P + st[1]*e1 + st[2]*e2, λm, :newton
-                @debug "Newton-first rejected: converged = $converged, |st|/w = $(norm(st)/w), loop swaps = $swaps"
+            if newton_first && converged && norm(st) ≤ w
+                in_plane(x) = P2((x - prm_P) ⋅ e1, (x - prm_P) ⋅ e2)       # slice coordinates of a 3D point
+                loop, pairs, carried = check_loop(A, prm_P + st[1]*e1 + st[2]*e2, normalize(t), e1, e2, loop_ratio*w,
+                                                 carry, x -> model(in_plane(x)); kwargs...)
+                swaps = swaps_from(A, loop, pairs; kwargs...)
+                swaps && return prm_P + st[1]*e1 + st[2]*e2, λm, :newton, (x=position(loop, 0.0), pairs=pairs), carried
+                @debug "Newton-first rejected: loop swaps = $swaps (pair carried: $carried)"
+            elseif newton_first
+                @debug "Newton-first rejected: converged = $converged, |st|/w = $(norm(st)/w)"
             end
         end
     catch err
@@ -168,7 +175,37 @@ function ep_correct(A, prm_P::P3, t::P3, σ; w, newton_first=true, loop_ratio=1/
     converged || error("Newton on D did not converge from the bracketing rectangle")
     hx, hy = (x1 - x0)/2, (y1 - y0)/2
     (x0 - hx ≤ st[1] ≤ x1 + hx && y0 - hy ≤ st[2] ≤ y1 + hy) || error("Newton on D left the bracketing rectangle")
-    return prm_P + st[1]*e1 + st[2]*e2, λm, :bracket
+    return prm_P + st[1]*e1 + st[2]*e2, λm, :bracket, nothing, false
+end
+
+"""
+    check_loop(A, center, t̂, e1, e2, ρ, carry, targets; kwargs...)
+
+The check loop of `ep_correct` around the EP `center` (3D), of radius `ρ` in the plane normal to `t̂`, and the pair at
+its start: `(loop, pairs, carried)`. With `carry = (x, pairs)`, the pair at the previous loop's start x: the loop starts
+at its point nearest x and the pair is tracked from x to there (a short segment, beside the EP line): its identity is
+then guaranteed by continuation (`carried`). Without it, or if that tracking fails, the loop starts along `e1` and the
+pair is picked near `targets(start)` (the local model of the pair).
+"""
+function check_loop(A, center, t̂, e1, e2, ρ, carry, targets; kwargs...)
+    if carry !== nothing
+        d = carry.x - center
+        d -= (d ⋅ t̂)*t̂
+        if norm(d) > 0
+            u1 = normalize(d)
+            loop = Circle(center, ρ, u1, t̂ × u1)
+            x = position(loop, 0.0)
+            sols = [first(track(A, Segment(carry.x, x), λ0, r0; kwargs...)) for (λ0, r0) ∈ carry.pairs]
+            if all(tracking_succeeded, sols)
+                pairs = [(s.u[end][end], s.u[end][1:end - 1]) for s ∈ sols]
+                abs(pairs[1][1] - pairs[2][1]) > 0 && return loop, pairs, true
+            end
+            @debug "carrying the pair to the new check loop failed"
+        end
+    end
+    loop = Circle(center, ρ, e1, e2)
+    tg = targets(position(loop, 0.0))
+    return loop, eigenpairs_near(A(position(loop, 0.0)), tg; δσ=0.01*abs(tg[1] - tg[2])), false
 end
 
 """
@@ -180,19 +217,20 @@ last point is the first one outside), `:closed` (back near the first point, same
 corrector failed down to `hmin`: the line may end at a higher-order point, or leave the region where the pair is
 found), and `counts` of the corrections: `newton` and `bracket` (successful corrections, by the path of `ep_correct`,
 including the seed and steps then rejected for turning), `failed` (the corrector threw) and `turned` (steps rejected:
-the tangent turned by more than θmax).
+the tangent turned by more than θmax), and `carried` (check loops whose pair was carried from the previous one).
 """
 struct EPLine
     points::Vector{P3}
     λs::Vector{ComplexF64}
     tangents::Vector{P3}
     status::Symbol
-    counts::NamedTuple{(:newton, :bracket, :failed, :turned),NTuple{4,Int}}
+    counts::NamedTuple{(:newton, :bracket, :failed, :turned, :carried),NTuple{5,Int}}
 end
 
 """
     track_ep_line(A, prm_P0, σ0; h, direction=1, nsteps=200, hmin=h/64, hmax=4h, w_ratio=0.5, θmax=0.15,
-                  bounds=nothing, newton_first=true, greedy=true, depth=4, fd_ratio=1e-3, xtol_ratio=1e-8, kwargs...)
+                  bounds=nothing, newton_first=true, continue_pair=true, greedy=true, depth=4, fd_ratio=1e-3,
+                  xtol_ratio=1e-8, kwargs...)
 
 Follows the line of EP2s of the three-parameter family `A` through `prm_P0`, an approximate EP (e.g. from a scan or
 `ep_bisect` in a 2D slice, mapped to 3D) whose coalesced eigenvalue is near `σ0`. Returns an `EPLine`.
@@ -200,7 +238,8 @@ Follows the line of EP2s of the three-parameter family `A` through `prm_P0`, an 
   corrector in the plane through prm_P0 normal to it.
 - Step: predictor P + h t, corrector `ep_correct` within the distance `w_ratio*h` (the prediction error, ~ θ h/2 for
   a turn θ per step, must stay well inside it; `newton_first`, `greedy` and `depth` are passed to it), new tangent
-  ∇Re D × ∇Im D there.
+  ∇Re D × ∇Im D there. With `continue_pair`, the pair of each check loop is carried from the previous accepted one
+  (see `check_loop`), so that the line follows the same pair by continuation.
 - Step control: a step whose corrector fails, or whose tangent turns by more than `θmax` (radians), is rejected and h
   halved; after a step turning by less than θmax/3, h grows by 1.5, up to `hmax`.
 - Stops after `nsteps` points, when a point leaves `bounds = (lo, hi)` (corners of a box, `P3`), when the line closes,
@@ -209,13 +248,17 @@ Follows the line of EP2s of the three-parameter family `A` through `prm_P0`, an 
   below `xtol_ratio` times the box half-width. `kwargs` are passed to `track` (bisection lines).
 """
 function track_ep_line(A, prm_P0::P3, σ0; h, direction=1, nsteps=200, hmin=h/64, hmax=4h, w_ratio=0.5, θmax=0.15,
-                       bounds=nothing, newton_first=true, greedy=true, depth=4, fd_ratio=1e-3, xtol_ratio=1e-8,
-                       kwargs...)
-    counts = Dict(:newton => 0, :bracket => 0, :failed => 0, :turned => 0)
+                       bounds=nothing, newton_first=true, continue_pair=true, greedy=true, depth=4, fd_ratio=1e-3,
+                       xtol_ratio=1e-8, kwargs...)
+    counts = Dict(:newton => 0, :bracket => 0, :failed => 0, :turned => 0, :carried => 0)
+    carry, carry_new = nothing, nothing           # the pair at the last accepted check loop's start, and the candidate
     function correct(prm_P, t, σ, h)
-        Q, λQ, path = ep_correct(A, prm_P, t, σ; w=w_ratio*h, newton_first, greedy, depth, fd=fd_ratio*w_ratio*h,
-                                 xtol=xtol_ratio*w_ratio*h, kwargs...)
+        Q, λQ, path, c_out, carried = ep_correct(A, prm_P, t, σ; w=w_ratio*h, newton_first, greedy, depth,
+                                                 carry=continue_pair ? carry : nothing, fd=fd_ratio*w_ratio*h,
+                                                 xtol=xtol_ratio*w_ratio*h, kwargs...)
         counts[path] += 1
+        counts[:carried] += carried
+        carry_new = c_out
         return Q, λQ
     end
     t, σ = ep_tangent(A, prm_P0, σ0; fd=fd_ratio*h)
@@ -231,6 +274,7 @@ function track_ep_line(A, prm_P0::P3, σ0; h, direction=1, nsteps=200, hmin=h/64
         end
     end
     P, λ = seed
+    carry = carry_new
     t_P, λ = ep_tangent(A, P, λ; fd=fd_ratio*h)
     points, λs, tangents = [P], [λ], [sign(t_P ⋅ (direction*t))*t_P]
     status = :max_steps
@@ -260,6 +304,7 @@ function track_ep_line(A, prm_P0::P3, σ0; h, direction=1, nsteps=200, hmin=h/64
             continue
         end
         push!(points, Q); push!(λs, λQ); push!(tangents, t_Q)
+        carry = carry_new
         if bounds !== nothing && !all(bounds[1] .≤ Q .≤ bounds[2])
             status = :left_bounds
             break
@@ -270,5 +315,6 @@ function track_ep_line(A, prm_P0::P3, σ0; h, direction=1, nsteps=200, hmin=h/64
         end
         θ < θmax/3 && (h = min(1.5h, hmax))
     end
-    return EPLine(points, λs, tangents, status, (; (k => counts[k] for k ∈ (:newton, :bracket, :failed, :turned))...))
+    return EPLine(points, λs, tangents, status,
+                  (; (k => counts[k] for k ∈ (:newton, :bracket, :failed, :turned, :carried))...))
 end

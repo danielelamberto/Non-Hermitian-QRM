@@ -21,7 +21,8 @@ using LinearAlgebra
 using SparseArrays
 using Polynomials
 using Accessors
-using OrdinaryDiffEqVerner
+using OrdinaryDiffEqTsit5               # default integrator of `track`
+using OrdinaryDiffEqVerner             # Vern7: high-accuracy option of `track`
 import ForwardDiff                    # Jacobians of reparametrisations (Reparametrised)
 import QuantumToolbox: SVector
 import Base: position                 # position(path, u): methods for our paths
@@ -53,7 +54,8 @@ export QRM, qrm_operators, excitation_sector, jc_effective_energies, jc_spectrum
 export P2, P3, ParamPath, plane_basis, Circle, Polygon, Segment, velocity, breakpoints, AffineLiouvillian, work_matrix,
        evaluate!, derivative, derivative!, slice, Reparametrised
 # tracking.jl
-export Eigenpair, eigenpairs_near, pair_near, normalisation, StaleLU, tangent, correct!, track, tracking_succeeded
+export Eigenpair, eigenpairs_near, pair_near, normalisation, StaleLU, tangent, correct!, track, tracking_succeeded,
+       EulerNewton, ContinuationSolution, Tsit5, Vern7
 # bisection.jl
 export TrackedLine, branch, track_line, pair_midpoint, rect_swaps, ep_bisect, disc_fit, ep_bracket
 # scan.jl

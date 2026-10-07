@@ -54,13 +54,15 @@ end
 
 Tracks both eigenvalues of the pair from `a` to `b`, starting from shift-invert near the `targets` at a. The shift
 offset is at most 1% of the targets' separation: near an EP the pair is close, and a fixed offset would converge both
-searches to the same eigenvalue.
+searches to the same eigenvalue. The lines are read anywhere along them (`branch`, at the corners of rectangles that
+lie inside a line, and at the samples of `disc_fit`), so their dense output must be accurate even close to an EP:
+by default `alg=Vern7(lazy=false), reltol=1e-10, abstol=1e-12` (overridden by `kwargs`, passed to `track`).
 """
-function track_line(A, a::P2, b::P2, targets; kwargs...)
+function track_line(A, a::P2, b::P2, targets; alg=Vern7(lazy=false), reltol=1e-10, abstol=1e-12, kwargs...)
     pairs = eigenpairs_near(A(a), targets; δσ=min(1e-3, 0.01*abs(targets[1] - targets[2])))
     sols = Any[]
     for (λ0, r0) ∈ pairs
-        sol, _ = track(A, Segment(a, b), λ0, r0; kwargs...)
+        sol, _ = track(A, Segment(a, b), λ0, r0; alg, reltol, abstol, kwargs...)
         tracking_succeeded(sol) || error("tracking along $a → $b failed ($(sol.retcode))")
         push!(sols, sol)
     end
@@ -155,23 +157,31 @@ end
 ## Greedy bracketing: regula falsi on the discriminant, bracketed by a 3 × 3 split
 
 """
-    disc_fit(lines, (x0, x1, y0, y1); k=4)
+    disc_fit(A, lines, (x0, x1, y0, y1); k=4)
 
 Affine fit of the discriminant D = (λa - λb)² of the pair, read on the tracked lines along the sides of the rectangle
-(`k` points per side): D ≈ D0 + Dx (x - xc) + Dy (y - yc) around its centre, by least squares. D is smooth and vanishes
+(`k` points per side; the eigenpairs of the lines' dense output there are polished by Newton on `A`, so that the fit
+does not depend on the integrator's tolerance): D ≈ D0 + Dx (x - xc) + Dy (y - yc) around its centre, by least squares. D is smooth and vanishes
 linearly at an EP2, so the zero of the fit approximates the EP with an error ~ curvature × size². Returns (zero of the
 fit, error estimate: the largest residual of the fit over the smallest singular value of the real Jacobian of
 (Re D, Im D)).
 """
-function disc_fit(lines, (x0, x1, y0, y1); k=4)
+function disc_fit(A, lines, (x0, x1, y0, y1); k=4)
     c = (P2(x0, y0), P2(x1, y0), P2(x1, y1), P2(x0, y1))
     pts, Ds = P2[], ComplexF64[]
     for i ∈ 1:4
         l, sa, sb = find_line(lines, c[i], c[mod1(i + 1, 4)])
         for j ∈ 0:k - 1
             s = sa + (sb - sa)*j/k
-            push!(pts, l.a + s*(l.b - l.a))
-            push!(Ds, (branch(l, 1, s) - branch(l, 2, s))^2)
+            x = l.a + s*(l.b - l.a)
+            L = A(x)
+            λs = map(l.sols) do sol                             # dense output, polished to an exact eigenpair
+                y = sol(s)
+                r = y[1:end - 1]
+                first(correct!(r, L, y[end], normalisation(r); maxiter=3))
+            end
+            push!(pts, x)
+            push!(Ds, (λs[1] - λs[2])^2)
         end
     end
     xc = P2((x0 + x1)/2, (y0 + y1)/2)
@@ -196,7 +206,7 @@ end
 
 Greedy variant of `ep_bisect`, from a rectangle `(x0, x1, y0, y1)` that swaps the pair, until its larger side is
 below `tol` (or `maxiter` iterations). Each iteration: the zero P* of the affine fit of D on the rectangle's sides
-(`disc_fit`, free: D is read on the tracked lines), and the lines x = x* ± δ, y = y* ± δ across the whole rectangle,
+(`disc_fit`: D is read on the tracked lines, almost free), and the lines x = x* ± δ, y = y* ± δ across the whole rectangle,
 with δ = `safety` × the fit's error estimate. They cut it into up to 9 cells, the central one a small rectangle around
 P*; every cell's sides lie on tracked lines, and exactly one cell swaps (the bracket is kept, as in the bisection).
 If the fit is right, the rectangle shrinks from size w to ~ w²; if the EP lies outside the central cell, an outer cell
@@ -217,7 +227,7 @@ function ep_bracket(A, rect, corner_targets; tol, maxiter=10, safety=2.0, thread
     for it ∈ 1:maxiter
         x0, x1, y0, y1 = rect
         max(x1 - x0, y1 - y0) ≤ tol && break
-        P, err = disc_fit(lines, rect)
+        P, err = disc_fit(A, lines, rect)
         δ = max(safety*err, 1e-4*max(x1 - x0, y1 - y0), tol/4)
         for attempt ∈ 0:2
             xs, ys = bracket_cuts(x0, x1, P[1], δ), bracket_cuts(y0, y1, P[2], δ)

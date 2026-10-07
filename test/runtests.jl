@@ -89,10 +89,18 @@ end
         @test !swaps(A_mock, both, dimer_pairs(position(both, 0.), 2))
         around_dp = Circle(P2(dp.x, dp.y), 0.05)
         @test !swaps(A_mock, around_dp, dimer_pairs(position(around_dp, 0.), 3))
-        # tracked eigenvalue = closed form along the loop; stale LU and fresh factorisations agree
+        # tracked eigenvalue = closed form along the loop: exact at the steps (corrector), ~reltol in between (dense
+        # output; tight with Vern7); stale LU and fresh factorisations agree
         (λ0, r0), _ = dimer_pairs(position(one_ep, 0.), 2)
         sol, _ = track(A_mock, one_ep, λ0, r0)
-        @test maximum(minimum(abs.(sol(u)[end] .- mock_spectrum(mock_at(position(one_ep, u))))) for u ∈ 0:0.01:1) < 1e-8
+        exact_at(u) = mock_spectrum(mock_at(position(one_ep, u)))
+        @test maximum(minimum(abs.(y[end] .- exact_at(u))) for (u, y) ∈ zip(sol.t, sol.u)) < 1e-10
+        @test maximum(minimum(abs.(sol(u)[end] .- exact_at(u))) for u ∈ 0:0.01:1) < 1e-6
+        sol_v, _ = track(A_mock, one_ep, λ0, r0; alg=Vern7(lazy=false), reltol=1e-10, abstol=1e-12)
+        @test maximum(minimum(abs.(sol_v(u)[end] .- exact_at(u))) for u ∈ 0:0.01:1) < 1e-8
+        @test abs(sol_v.u[end][end] - sol.u[end][end]) < 1e-10
+        sol_r, _ = track(A_mock, one_ep, λ0, r0; gmres=false)
+        @test abs(sol_r.u[end][end] - sol.u[end][end]) < 1e-10
         sol_fresh, _ = track(A_mock, one_ep, λ0, r0; stale=false)
         @test abs(sol.u[end][end] - sol_fresh.u[end][end]) < 1e-10
         # 3D: the mock with an inert third coordinate, so that the EP is a line along z. A tilted circle links it iff
@@ -121,7 +129,8 @@ end
         @test swaps(R, θ_loop, pairs)
         sol, _ = track(R, θ_loop, pairs[1]...)
         exact(u) = mock_spectrum(mock_at(polar(position(θ_loop, u))))
-        @test maximum(minimum(abs.(sol(u)[end] .- exact(u))) for u ∈ 0:0.01:1) < 1e-8
+        @test maximum(minimum(abs.(y[end] .- exact(u))) for (u, y) ∈ zip(sol.t, sol.u)) < 1e-10
+        @test maximum(minimum(abs.(sol(u)[end] .- exact(u))) for u ∈ 0:0.01:1) < 1e-6
         sol_J, _ = track(Reparametrised(A_mock, polar; Jφ=J_polar), θ_loop, pairs[1]...)
         @test abs(sol_J.u[end][end] - sol.u[end][end]) < 1e-10
         # a scan of an annulus around the EP flags nothing: no cell of (r, θ) contains it
@@ -161,7 +170,7 @@ end
         c = (P2(small[1], small[3]), P2(small[2], small[3]), P2(small[2], small[4]), P2(small[1], small[4]))
         lines = [track_line(A_mock, c[1], c[2], targets(c[1])), track_line(A_mock, c[2], c[3], targets(c[2])),
                  track_line(A_mock, c[4], c[3], targets(c[4])), track_line(A_mock, c[1], c[4], targets(c[1]))]
-        zero, err = disc_fit(lines, small)
+        zero, err = disc_fit(A_mock, lines, small)
         @test norm(zero - P2(ep.x, ep.y)) < max(3err, 1e-12) && err < 1e-4
         # the corrector of an EP-line tracker: bisection in a tilted plane of the 3D mock (inert z: the EP is a
         # vertical line), on the slice of the family, in the plane's own coordinates (s, t)

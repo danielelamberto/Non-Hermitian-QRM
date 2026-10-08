@@ -385,6 +385,19 @@ end
         # the pattern depends on neither H nor the spectra (here g = 0, zero rate, T = 0)
         L2 = Redfield(â, σ̂, QRM(ωa=1.0, ωb=1.2, g=0.0, γa=0.0, γb=0.02))
         @test L2.data.colptr == L.data.colptr && rowvals(L2.data) == rowvals(L.data)
+        # the precomputed linear map: the same L, in the odd sector and in full, on the same pattern, at two points
+        odd = sort(reduce(vcat, excitation_sector(Nc, k) for k ∈ -Nc:Nc if isodd(k)))
+        for idx ∈ (odd, nothing)
+            R = RedfieldMap(first.(redfield_baths(â, σ̂, q)); idx)
+            for p ∈ (q, QRM(ωa=1.1, ωb=0.7, g=0.05, γa=0.1, γb=0.0, Ta=0.02, Tb=0.01))
+                L_map, L_ref = R(Hamiltonian(â, σ̂, p), redfield_baths(â, σ̂, p)), Redfield(â, σ̂, p).data
+                L_ref = idx === nothing ? L_ref : L_ref[idx, idx]
+                @test L_map.colptr == L_ref.colptr && rowvals(L_map) == rowvals(L_ref)
+                @test norm(L_map - L_ref) < 1e-14*norm(L_ref)
+            end
+        end
+        R = RedfieldMap(first.(redfield_baths(â, σ̂, q)); idx=odd)
+        @test_throws ArgumentError R(Hamiltonian(â, σ̂, q), reverse(redfield_baths(â, σ̂, q)))     # baths swapped
         # boson dimer at T = 0
         n = 4
         â, b̂ = destroy(n) ⊗ eye(n), eye(n) ⊗ destroy(n)

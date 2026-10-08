@@ -102,10 +102,18 @@ through σx with κ = γb/ωb at Tb, so that the decay rates of the bare excitat
 even at zero rate, so that the pattern of L does not depend on the parameters. Smooth in the parameters for Ta, Tb > 0;
 at T = 0 the spectrum has a kink at ω = 0, and L one wherever two levels coupled by the bath cross.
 """
-function Redfield(â::QuantumObject, σ̂::QuantumObject, mdl::QRM)
+Redfield(â::QuantumObject, σ̂::QuantumObject, mdl::QRM) = redfield_liouvillian(Hamiltonian(â, σ̂, mdl), redfield_baths(â, σ̂, mdl))
+
+"""
+    redfield_baths(â, σ̂, mdl::QRM)
+
+The baths of `Redfield(â, σ̂, mdl)`, as pairs (X̂, S) of a coupling operator and its spectrum: (a + a†, Ohmic of
+κ = γa/ωa at Ta) and (σx, Ohmic of κ = γb/ωb at Tb). For a fast family: `R = RedfieldMap(first.(redfield_baths(â,
+σ̂, mdl)); idx)` once, then `R(Hamiltonian(â, σ̂, mdl), redfield_baths(â, σ̂, mdl))` at each point.
+"""
+function redfield_baths(â::QuantumObject, σ̂::QuantumObject, mdl::QRM)
     (;ωa, ωb, γa, γb, Ta, Tb) = mdl
-    bths = [(â + â', ohmic(γa/ωa, Ta)), (σ̂ + σ̂', ohmic(γb/ωb, Tb))]
-    return redfield_liouvillian(Hamiltonian(â, σ̂, mdl), bths)
+    return [(â + â', ohmic(γa/ωa, Ta)), (σ̂ + σ̂', ohmic(γb/ωb, Tb))]
 end
 
 ## Excitation-number sectors

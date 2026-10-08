@@ -37,7 +37,9 @@ tracking.jl                                         follow one eigenpair along a
   `RWA_coupling`, …), and their analytic response: `D_R`, the characteristic polynomial `disc`, analytic `EP`s.
 - `master_equations.jl`: `Lindbladian`, `Redfield`, `DressedLiouvillian`, modes and symmetry sectors. Redfield is
   assembled here (`redfield_liouvillian`, in the Fock basis, on a pattern fixed by the coupling operators), checked
-  against QuantumToolbox's `bloch_redfield_tensor`.
+  against QuantumToolbox's `bloch_redfield_tensor`. Along a family, `RedfieldMap` does the assembly as one sparse
+  product: L is linear in H and in the filtered operators Λ (and their conjugates), so its stored values in a sector
+  are M x, with M built once from the assembly on unit inputs.
 - `mock.jl`: `MockLiouvillian`, a direct sum of small blocks with exactly known spectrum and planted singularities
   (EP2s, a DP, a real-axis EP line, a DP line): the test bed of every algorithm below.
 - `qrm.jl`: the quantum Rabi model (`QRM`), its Jaynes–Cummings limit and closed forms (`jc_spectrum`, `jc_EP`),
@@ -51,7 +53,8 @@ tracking.jl                                         follow one eigenpair along a
    direction in place. In practice L is first restricted to a symmetry sector (`excitation_sector`, parity).
    A Liouvillian smooth but not affine in P (Redfield: built in the eigenbasis of H(P)) is an `FDLiouvillian`
    (`finite_differences.jl`): L(P) rebuilt by its builder at every evaluation, its derivative by a central
-   difference (two builds), on the fixed pattern of the builder's matrices.
+   difference (two builds), on the fixed pattern of the builder's matrices. For Redfield, the builder is a
+   `RedfieldMap` (about 20× faster than a full assembly).
 2. `slice(A, P₀, e1, e2)` restricts a family to a plane; `Reparametrised` changes coordinates (log rates, polar
    coordinates, …); both keep the same interface, so every algorithm below runs on them unchanged.
 3. **Paths** (`paths.jl`): `Circle`, `Polygon`, `Segment`, in 2D (`P2`) or 3D (`P3`), each giving `position(p, u)`,

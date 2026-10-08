@@ -202,8 +202,8 @@ fig
 #%% EP lines of the full QRM with Redfield baths: seeds
 
 # The setup of ep_lines.jl (full coupling): odd sector, Nc = 10, ωa,b = ω0 ± δω, γa,b = γ0 ± δγ, coupling g, tower of
-# EP_n near δω = 0, g = δγ/(2√n), seeds in the slice g = g0. A Redfield scan of that slice would cost ~100× the
-# Lindblad one (18 s): instead, the Lindblad seeds (scan and localise_eps on the affine family), then the Redfield EP
+# EP_n near δω = 0, g = δγ/(2√n), seeds in the slice g = g0. A Redfield scan of that slice costs a few times the
+# Lindblad one (18 s) even with RedfieldMap: instead, the Lindblad seeds (scan and localise_eps on the affine family), then the Redfield EP
 # of the same pair from each, by the corrector of the line tracker in the slice (ep_correct with normal t = ĝ: Newton
 # on D from the Lindblad seed, certified by a check loop that swaps the pair, bracketing otherwise). Two seeds: one
 # pair of EP_1 and one of EP_2. Redfield at T = 0.02: smooth (h checked inside the tower region), with thermal
@@ -217,8 +217,12 @@ qrm_at(mdl, prm_P) = setproperties(mdl, (ωa=ω0 + prm_P[1], ωb=ω0 - prm_P[1],
 slice_g0(A) = slice(A, P3(0, 0, g0), P3(1, 0, 0), P3(0, 1, 0))
 A_lind = AffineLiouvillian(prm_P -> liouvillian(Lindbladian(â, σ̂, qrm_at(QRM(approx=[RWA_env]), prm_P))...).data[odd, odd],
                            3; h=0.01)
-A_red = FDLiouvillian(prm_P -> Redfield(â, σ̂, qrm_at(QRM(Ta=T_R, Tb=T_R), prm_P)).data[odd, odd], P3(0, 0.016, g0);
-                      check_at=P3(0.002, 0.03, 0.02))
+# Redfield by its precomputed linear map (RedfieldMap): the X's and the sector are fixed along the family, so L is
+# M x with x = (H, Λ's), ~20× faster than redfield_liouvillian's sparse assembly, to round-off the same matrix
+R_map = RedfieldMap(first.(redfield_baths(â, σ̂, QRM())); idx=odd)
+red_at(prm_P) = qrm_at(QRM(Ta=T_R, Tb=T_R), prm_P)
+A_red = FDLiouvillian(prm_P -> R_map(Hamiltonian(â, σ̂, red_at(prm_P)), redfield_baths(â, σ̂, red_at(prm_P))),
+                      P3(0, 0.016, g0); check_at=P3(0.002, 0.03, 0.02))
 
 xs_s, ys_s = range(-0.0031, 0.0029, 7), range(0.0043, 0.0373, 21)       # as ep_lines.jl: n ≤ 5, no node on δω = 0
 F = eigen(Matrix(slice_g0(A_lind)(P2(xs_s[1], ys_s[1]))))
@@ -244,7 +248,8 @@ end
 # parallel: start Julia with --threads=4) and for Lindblad from the same pairs, then a dense check of the Redfield
 # points (gap of the pair). Left: the shift δω of the lines off δω = 0, against g. Lindblad: δω = +n g²/2 (the
 # Bloch–Siegert-like shift of ep_lines.jl); Redfield: δω = -n g²/2, the opposite shift (to be understood: the
-# non-secular terms of the x-coupled baths, against the p-like coupling -ig(a - a†)σx of the dipole gauge?). Right: the
+# non-secular terms of the x-coupled baths, against the p-like coupling -ig(a - a†)σx of the dipole gauge?). Redfield
+# with RedfieldMap: ~3× the Lindblad time (12× faster than with redfield_liouvillian at every build). Right: the
 # deviation from g = δγ/(2√n), a few 1e-6 for both.
 bounds_s = (P3(-0.01, -0.048, 0.002), P3(0.01, 0.048, 0.03))
 track_lines(A, seeds) = [join_halves(hv...) for hv ∈ track_ep_lines(A, seeds; h=0.002, hmax=0.002, nsteps=80, bounds=bounds_s)]

@@ -46,13 +46,13 @@ include("localise.jl")
 export Model, Approximation, RWA_env, RWA_coupling, N_conserving, linearised, Boson, BosonDimer, Duffing, Optomech,
        classical_steady_state, classical_displacement, linearised_dimer, linearised_EP, D_R, disc, EP, roots_sorted
 # master_equations.jl
-export Hamiltonian, Lindbladian, DressedLiouvillian, Redfield, redfield_liouvillian, redfield_pattern, modes,
-       dressed_modes, parity_sector, min_gap, dominant_mode
+export Hamiltonian, Lindbladian, DressedLiouvillian, Redfield, redfield_liouvillian, redfield_pattern, RedfieldMap,
+       modes, dressed_modes, parity_sector, min_gap, dominant_mode
 # mock.jl
 export MockBlock, DimerBlock, DrivenQubit, DetunedQubit, MockLiouvillian, default_mock_blocks, block_spectrum,
        mock_sector, mock_matrix, mock_spectrum, mock_singularities
 # qrm.jl
-export QRM, qrm_operators, excitation_sector, jc_effective_energies, jc_spectrum, jc_EP
+export QRM, qrm_operators, redfield_baths, excitation_sector, jc_effective_energies, jc_spectrum, jc_EP
 # paths.jl, affine.jl
 export P2, P3, ParamPath, plane_basis, Circle, Polygon, Segment, velocity, breakpoints, AffineLiouvillian, work_matrix,
        evaluate!, derivative, derivative!, slice, Reparametrised

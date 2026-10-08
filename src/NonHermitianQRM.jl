@@ -55,7 +55,7 @@ export P2, P3, ParamPath, plane_basis, Circle, Polygon, Segment, velocity, break
        evaluate!, derivative, derivative!, slice, Reparametrised
 # tracking.jl
 export Eigenpair, eigenpairs_near, pair_near, normalisation, StaleLU, tangent, correct!, track, tracking_succeeded,
-       EulerNewton, ContinuationSolution, Tsit5, Vern7
+       Tsit5, Vern7
 # bisection.jl
 export TrackedLine, branch, track_line, pair_midpoint, rect_swaps, ep_bisect, disc_fit, ep_bracket
 # scan.jl

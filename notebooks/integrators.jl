@@ -13,7 +13,7 @@
 # loop's pair from one step to the next (`continue_pair`, now the default; 427 of 427 non-seed loops carried):
 #   old default (Vern7 1e-10, refinement)   112.5 s / 117.4 s with carrying
 #   new default (Tsit5 1e-6, GMRES)          24.9 s /  27.1 s
-#   EulerNewton(α=0.1, quadratic), GMRES     19.5 s /  22.3 s
+#   a hand-written Euler–Newton continuation (since removed), GMRES   19.5 s / 22.3 s
 # No corrector failure in any of them, every point an EP by dense diagonalisation (pair gap ≤ 9e-8).
 
 #%% Packages
@@ -34,10 +34,8 @@ strategies = [
     "Tsit5 1e-6 r"                => (alg=Tsit5(), reltol=1e-6, abstol=1e-8, gmres=false),
     "Tsit5 1e-4 r"                => (alg=Tsit5(), reltol=1e-4, abstol=1e-6, gmres=false),
     "BS3 1e-4 r"                  => (alg=BS3(), reltol=1e-4, abstol=1e-6, gmres=false),
-    "EulerNewton2 r"              => (alg=EulerNewton(α=0.1, quadratic=true), gmres=false),
     "Vern7 1e-10 g"               => (alg=Vern7(lazy=false), reltol=1e-10, abstol=1e-12),
     "Tsit5 1e-6 g (new default)"  => (;),
-    "EulerNewton2 g"              => (alg=EulerNewton(α=0.1, quadratic=true),),
 ]
 
 # Families: the mock (18 states), the full QRM's odd sector (Nc = 10: 200 states), the Lindblad boson dimer (625)
@@ -161,7 +159,9 @@ workloads = [
 #%% Benchmark: every strategy on every workload (one warm-up pass, then the fastest of 3; ~5 min)
 
 # The full comparison (23 variants, 2026-10-07) also had Vern6, Tsit5 at 1e-8/1e-5, BS3 at 1e-6/1e-3, refinement to 1e-9,
-# and Euler–Newton with α = 0.05–0.2, linear predictor: same picture. Scans became wrong at reltol 1e-4 (Tsit5, BS3):
+# and a hand-written Euler–Newton continuation (Euler or quadratic predictor, Newton corrector, step accepted if the
+# corrector's displacement ≤ α × the predictor's, α = 0.05–0.2): 1.3–1.5× faster than Tsit5 on loops, equal on scans,
+# but custom code with special cases (paths crossing an EP); removed in favour of the library solver. Same picture. Scans became wrong at reltol 1e-4 (Tsit5, BS3):
 # the windings and labels need the steps to resolve the eigenvalues. 1e-6 keeps a decade of margin (1e-5 still passed).
 results = Dict{Tuple{String,String},Any}()
 for (sname, kw) ∈ strategies

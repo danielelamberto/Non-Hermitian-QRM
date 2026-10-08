@@ -156,16 +156,17 @@ function tower_seeds(A, start)
     println(length(start), " eigenvalues tracked; scan ", round(t, digits=1), " s, ", count(flagged, cells),
             " flagged cells; localisation ", round(t_l, digits=1), " s: ", length(loc.eps), " EPs, ", length(loc.dps),
             " DPs, ", length(loc.unresolved), " unresolved")
-    map(loc.eps) do e
+    seeds = map(loc.eps) do e
         seed = P3((e.rect[1] + e.rect[2])/2, (e.rect[3] + e.rect[4])/2, g0_q)
         n = (seed[2]/(2g0_q))^2                                            # manifold, from the JC formula
         println("  EP at (δω, δγ) = ", round.(seed[1:2], sigdigits=6), ", n ≈ ", round(n, digits=3), ", λ = ",
                 round(e.λ, digits=5))
         (seed=seed, n=n, λ=e.λ)
     end
+    return seeds, cells, loc                                  # the cells and the localisation, for plots
 end
 F_jc = eigen(Matrix(slice_g0(A_jc)(P2(xs_q[1], ys_q[1]))))
-seeds_jc = tower_seeds(A_jc, collect(zip(F_jc.values, eachcol(F_jc.vectors))))
+seeds_jc, cells_jc, loc_jc = tower_seeds(A_jc, collect(zip(F_jc.values, eachcol(F_jc.vectors))))
 
 
 #%% Jaynes–Cummings limit: continuation of the tower
@@ -195,7 +196,7 @@ for l ∈ lines_jc
 end
 
 
-#%% Quantum Rabi model, full coupling (RWA_env only): seeds and continuation of the tower
+#%% Quantum Rabi model, full coupling (RWA_env only): seeds of the tower
 
 # Without RWA_coupling, H = ωa a†a + ωb σz/2 - ig(a - a†)σx conserves only the parity of N = a†a + σ+σ-: L is block
 # diagonal in the parity of k, and the odd sector holds ⟨a⟩, ⟨σ-⟩. Only its eigenvalues near Im λ = -ω0 (the k = 1
@@ -215,9 +216,67 @@ println("full QRM, odd sector: dimension ", length(odd_r))
 ys_q = range(0.0043, 0.0373, 21)                          # n ≤ 5 (EP_6 at δγ = 0.0392 for g0 = 0.008)
 F_r = eigen(Matrix(slice_g0(A_rabi)(P2(xs_q[1], ys_q[1]))))
 start_r = [(F_r.values[k], F_r.vectors[:, k]) for k ∈ findall(λ -> -1.5 < imag(λ) < -0.5, F_r.values)]
-seeds_rabi = tower_seeds(A_rabi, start_r)
+seeds_rabi, cells_rabi, loc_rabi = tower_seeds(A_rabi, start_r)
 
-# one seed per swapped pair (localise_eps brackets each pair of a swapping cell separately)
+
+#%% Full coupling: how the seeds were localised in the slice g = g0
+
+# Needs the previous cell. Left: the tracked scan of the slice (the grid xs_q × ys_q), its flagged cells (shaded: each
+# a clean swap of one or more pairs, so no refinement was needed) and the localised EPs (one per swapped pair, colour:
+# manifold n). Middle: the flagged cell of EP_n_zoom, with the lines tracked by the bracketing of each of its pairs
+# (colour: pair) and the rectangle kept at each iteration (thicker as they shrink): the first cuts at x* ± δ, y* ± δ
+# around the zero of the fit of D, then nested boxes. Right: zoom on the last iterations and the final boxes (size
+# tol = 1e-5), where the 3–4 pairs of EP_n_zoom sit apart (~1e-5 in δγ).
+n_zoom = 3
+rect_pts(r) = Point2f[(r[1], r[3]), (r[2], r[3]), (r[2], r[4]), (r[1], r[4]), (r[1], r[3])]
+centre(r) = Point2f((r[1] + r[2])/2, (r[3] + r[4])/2)
+manifold(e) = round(Int, (centre(e.rect)[2]/(2g0_q))^2)
+seed_colours = [clrs[k] for k ∈ (:byzantine, :selene, :minthe, :hesperides, :hyacinth)]
+pair_colours = [clrs[k] for k ∈ (:byzantine, :selene, :minthe, :helios)]
+fig_seeds = Figure(size=(1600, 600))
+ax_s = Axis(fig_seeds[1, 1]; xlabel="δω", ylabel="δγ", title="scan of the slice g = $g0_q and the localised EPs")
+for c ∈ cells_rabi
+    if flagged(c)
+        poly!(ax_s, rect_pts(c.rect); color=(clrs[:overlay], 0.4), strokecolor=clrs[:subtext], strokewidth=0.8)
+    else
+        lines!(ax_s, rect_pts(c.rect); color=clrs[:surface], linewidth=0.6)
+    end
+end
+for n ∈ 1:5
+    es = filter(e -> manifold(e) == n, loc_rabi.eps)
+    scatter!(ax_s, [centre(e.rect) for e ∈ es]; color=seed_colours[n], marker=:star5, markersize=11, label="EP_$n")
+end
+axislegend(ax_s; position=:rb, labelsize=10)
+es_zoom = filter(e -> manifold(e) == n_zoom, loc_rabi.eps)
+cell_zoom = es_zoom[1].cell
+ax_c = Axis(fig_seeds[1, 2]; xlabel="δω", ylabel="δγ", title="EP_$n_zoom: bracketing of its $(length(es_zoom)) pairs")
+ax_f = Axis(fig_seeds[1, 3]; xlabel="δω", ylabel="δγ", title="last iterations and final boxes")
+for (k, e) ∈ enumerate(es_zoom)
+    colour = pair_colours[mod1(k, length(pair_colours))]
+    for (a, b) ∈ e.segments
+        lines!(ax_c, [Point2f(a), Point2f(b)]; color=(colour, 0.5), linewidth=0.7)
+    end
+    for (it, r) ∈ enumerate(e.history)
+        for ax ∈ (ax_c, ax_f)
+            lines!(ax, rect_pts(r); color=colour, linewidth=0.8 + 0.6it,
+                   label=(it == 1 ? "λ ≈ $(round(e.λ, digits=4))" : nothing))
+        end
+    end
+    scatter!(ax_f, [centre(e.rect)]; color=colour, marker=:star5, markersize=14)
+end
+limits!(ax_c, cell_zoom...)
+lasts = reduce(vcat, [e.history[max(1, end - 1):end] for e ∈ es_zoom])    # the last two rectangles of each pair
+lo_x, hi_x = minimum(r -> r[1], lasts), maximum(r -> r[2], lasts)
+lo_y, hi_y = minimum(r -> r[3], lasts), maximum(r -> r[4], lasts)
+pad_x, pad_y = 0.15*(hi_x - lo_x), 0.15*(hi_y - lo_y)
+limits!(ax_f, lo_x - pad_x, hi_x + pad_x, lo_y - pad_y, hi_y + pad_y)
+Legend(fig_seeds[2, 2:3], ax_c; orientation=:horizontal, framevisible=false, labelsize=11, merge=true)
+fig_seeds
+
+
+#%% Full coupling: continuation of the tower
+
+# Needs the seeds cell. One seed per swapped pair (localise_eps brackets each pair of a swapping cell separately).
 lines_rabi = tower_lines(A_rabi, seeds_rabi,
                          ["QRM, n = $(round(Int, s.n)), λ_EP ≈ $(round(s.λ, digits=4))" for s ∈ seeds_rabi])
 # independent check: dense eigenvalues of the sector at the tracked points, the pair nearest λ: its gap (~√|D| at the

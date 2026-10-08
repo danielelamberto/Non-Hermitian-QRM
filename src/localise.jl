@@ -17,13 +17,16 @@
 
 An EP2 localised by `localise_eps`: the certified `rect` (a rectangle around which the pair swaps: the EP is inside),
 the coalesced eigenvalue `λ` (midpoint of the pair at the centre of rect), the `pair` (its two eigenvalues at the
-lower-left corner of the scan cell it was found in), and that `cell`.
+lower-left corner of the scan cell it was found in), that `cell`, and for plots the bracketing's `history` (the
+rectangle kept at each iteration, from the cell) and `segments` (the end points of its tracked lines).
 """
 struct LocalisedEP
     rect::NTuple{4,Float64}
     λ::ComplexF64
     pair::NTuple{2,ComplexF64}
     cell::NTuple{4,Float64}
+    history::Vector{NTuple{4,Float64}}
+    segments::Vector{NTuple{2,P2}}
 end
 
 """
@@ -31,13 +34,15 @@ end
 
 The result of `localise_eps`: the localised EP2s `eps`, the cells classified as `dps` (a winding ±2 persisting down to
 the depth limit: a DP, or two EP2s of the same orientation closer than the finest cell), the `unresolved` cells (cycles
-or windings |w| ≥ 3 at the depth limit, or whose bracketing failed), and the cells with `lost` labels.
+or windings |w| ≥ 3 at the depth limit, or whose bracketing failed), the cells with `lost` labels, and the sub-cells
+scanned by the refinements (`refined`, for plots).
 """
 struct Localisation
     eps::Vector{LocalisedEP}
     dps::Vector{ScanCell}
     unresolved::Vector{ScanCell}
     lost::Vector{ScanCell}
+    refined::Vector{ScanCell}
 end
 
 # what a cell needs: :empty, :bracket (only clean transpositions, |w| = 1), or :refine (an even winding, a
@@ -63,7 +68,7 @@ as parallel tasks, at most `ntasks` at a time. `kwargs` are passed to `track` (s
 `Localisation`.
 """
 function localise_eps(A, cells; max_depth=8, tol=1e-9, refine_lost=false, ntasks=4, kwargs...)
-    eps, dps, unresolved, lost = LocalisedEP[], ScanCell[], ScanCell[], ScanCell[]
+    eps, dps, unresolved, lost, refined = LocalisedEP[], ScanCell[], ScanCell[], ScanCell[], ScanCell[]
     todo = [(c, 0) for c ∈ cells if flagged(c) || c.lost > 0]
     while !isempty(todo)
         next = Tuple{ScanCell,Int}[]
@@ -77,6 +82,7 @@ function localise_eps(A, cells; max_depth=8, tol=1e-9, refine_lost=false, ntasks
                 if depth < max_depth
                     x0, x1, y0, y1 = c.rect
                     sub = tracked_scan(A, range(x0, x1, 3), range(y0, y1, 3), c.corner; kwargs...)
+                    append!(refined, sub)
                     append!(next, [(s, depth + 1) for s ∈ sub if flagged(s) || (refine_lost && s.lost > 0)])
                 else
                     push!(is_dp_like(c) ? dps : unresolved, c)
@@ -99,12 +105,12 @@ function localise_eps(A, cells; max_depth=8, tol=1e-9, refine_lost=false, ntasks
         end
         todo = next
     end
-    return Localisation(eps, dps, unresolved, lost)
+    return Localisation(eps, dps, unresolved, lost, refined)
 end
 
 # `ep_bracket` on one swapped pair of a scan cell, from its eigenvalues at the cell's corner; nothing if it fails
 function bracket_pair(A, c::ScanCell, (λa, λb); tol, kwargs...)
-    rect, _, lines = try
+    rect, history, lines = try
         ep_bracket(A, c.rect, [λa, λb]; tol, kwargs...)
     catch err
         err isa InterruptException && rethrow()
@@ -115,5 +121,5 @@ function bracket_pair(A, c::ScanCell, (λa, λb); tol, kwargs...)
     # the pair at the final rectangle's corner, read on its bottom side, then its midpoint at the centre
     l, s, _ = find_line(lines, P2(x0, y0), P2(x1, y0))
     _, λm = pair_disc(A, P2((x0 + x1)/2, (y0 + y1)/2), (branch(l, 1, s) + branch(l, 2, s))/2)
-    return LocalisedEP(rect, λm, (λa, λb), c.rect)
+    return LocalisedEP(rect, λm, (λa, λb), c.rect, history, [(l.a, l.b) for l ∈ lines])
 end

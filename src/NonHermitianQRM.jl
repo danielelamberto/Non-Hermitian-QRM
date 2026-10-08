@@ -7,7 +7,8 @@ Tools to find exceptional points (EPs) of Liouvillians.
   Jaynes–Cummings limit (`qrm.jl`).
 - Monodromy: eigenpairs followed continuously around loops in a two-parameter plane swap when the loop encloses an EP.
   Paths in 2D or 3D (`paths.jl`), Liouvillians affine in the parameters, their restriction to planes and
-  reparametrisations (`affine.jl`), predictor–corrector tracking of one eigenpair (`tracking.jl`), localisation of one
+  reparametrisations (`affine.jl`), smooth non-affine ones differentiated by finite differences
+  (`finite_differences.jl`), predictor–corrector tracking of one eigenpair (`tracking.jl`), localisation of one
   EP by bisection or greedy bracketing (`bisection.jl`), a systematic scan of a grid (`scan.jl`), the localisation of
   the EPs it finds (`localise.jl`), and the continuation of a line of EPs through a three-parameter space
   (`epline.jl`). Method and validation: notes/monodromy_tracking.typ.
@@ -34,6 +35,7 @@ include("mock.jl")
 include("qrm.jl")
 include("paths.jl")
 include("affine.jl")
+include("finite_differences.jl")
 include("tracking.jl")
 include("bisection.jl")
 include("scan.jl")
@@ -54,6 +56,8 @@ export QRM, qrm_operators, excitation_sector, jc_effective_energies, jc_spectrum
 # paths.jl, affine.jl
 export P2, P3, ParamPath, plane_basis, Circle, Polygon, Segment, velocity, breakpoints, AffineLiouvillian, work_matrix,
        evaluate!, derivative, derivative!, slice, Reparametrised
+# finite_differences.jl
+export FDLiouvillian
 # tracking.jl
 export Eigenpair, eigenpairs_near, pair_near, normalisation, StaleLU, tangent, correct!, track, tracking_succeeded,
        Tsit5, Vern7

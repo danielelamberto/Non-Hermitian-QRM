@@ -1,6 +1,6 @@
 # Checks of the package against exactly known cases: the mock Liouvillian (closed-form spectrum, planted singularities)
 # and the Lindblad boson dimer (modes from the characteristic polynomial disc), and our Redfield assembly against
-# QuantumToolbox's. About a minute on one thread.
+# QuantumToolbox's, with the finite-difference family built on it. About a minute and a half on one thread.
 using Test
 using NonHermitianQRM
 using NonHermitianQRM: Circle, SVector, ohmic, temperature
@@ -394,6 +394,44 @@ end
         o = Optomech(ωb=1.0, γa=0.1, γb=0.05, g=0.1, Δ=-1.0, F=0.2, nBa=0.1, nBb=0.2, approx=[])
         c_ops = [√(2o.γa*(1 + o.nBa))*â, √(2o.γa*o.nBa)*â']
         @test same(Redfield(â, b̂, o), br_tensor(Hamiltonian(â, b̂, o), [(b̂ + b̂', ohmic(2o.γb/o.ωb, temperature(o.nBb, o.ωb)))], c_ops))
+    end
+
+    @testset "finite-difference family (Redfield QRM, odd sector)" begin
+        Nc = 5
+        â, σ̂ = qrm_operators(Nc)
+        odd = sort(reduce(vcat, excitation_sector(Nc, k) for k ∈ -Nc:Nc if isodd(k)))
+        q = QRM(ωa=1.0, ωb=1.0, γa=0.1, γb=0.0, Ta=0.02, Tb=0.02)
+        # along the rates alone (H fixed), Redfield is affine: the finite differences are exact up to round-off
+        L_rates(prm_P) = Redfield(â, σ̂, setproperties(q, (g=0.3, γa=prm_P[1], γb=prm_P[2]))).data[odd, odd]
+        F, A = FDLiouvillian(L_rates, P2(0.1, 0.02)), AffineLiouvillian(L_rates, 2; h=0.05)
+        prm_P, v = P2(0.07, 0.03), P2(0.3, -1.2)
+        @test norm(F(prm_P) - A(prm_P)) < 1e-14*norm(A(prm_P))
+        @test norm(derivative(F, prm_P, v) - derivative(A, v)) < 1e-10*norm(derivative(A, v))
+        # along (g, ωb): central differences, error ∝ h² (h = 1e-3, far above the round-off)
+        L_gω(prm_P) = Redfield(â, σ̂, setproperties(q, (g=prm_P[1], ωb=prm_P[2]))).data[odd, odd]
+        prm_P, v = P2(0.3, 0.9), P2(1.0, 0.5)
+        dL(h) = derivative(FDLiouvillian(L_gω, prm_P; h, check=false), prm_P, v)
+        @test 3.9 < norm(dL(2e-3) - dL(1e-3))/norm(dL(1e-3) - dL(5e-4)) < 4.1
+        # the check of h: the default passes, a step too large fails by truncation, one too small by round-off
+        @test FDLiouvillian(L_gω, prm_P; check_at=P2(0.025, 1.0)) isa FDLiouvillian
+        @test_throws r"truncation" FDLiouvillian(L_gω, prm_P; h=0.05)
+        @test_throws r"round-off" FDLiouvillian(L_gω, prm_P; h=1e-12)
+        # slice: the generic restriction to a plane (Reparametrised) runs on it
+        A = FDLiouvillian(L_gω, P2(0.025, 1.0))
+        e1, e2 = P2(0.6, 0.8), P2(-0.8, 0.6)
+        S = slice(A, prm_P, e1, e2)
+        @test norm(S(P2(0.01, -0.02)) - A(prm_P + 0.01*e1 - 0.02*e2)) == 0
+        @test norm(derivative!(work_matrix(S), S, P2(0.01, -0.02), P2(1.0, 0.0)) - derivative(A, prm_P + 0.01*e1 - 0.02*e2, e1)) < 1e-12
+        # tracking: the pair near the JC EP₁ (g = γa/4 = 0.025, ωb = ωa) swaps around its Redfield counterpart, not
+        # beside it, and the tracked eigenvalues are exact eigenvalues at the end of the loop
+        for (centre, swapped) ∈ ((P2(0.025, 1.0), true), (P2(0.06, 1.0), false))
+            loop = Circle(centre, 0.01)
+            pair = pair_near(A(position(loop, 0.0)), -0.025 - 1.0im)
+            ends = [track(A, loop, λ0, r0)[1].u[end][end] for (λ0, r0) ∈ pair]
+            @test (argmin(abs.(first.(pair) .- ends[1])) == 2) == swapped
+            λ_dense = eigvals(Matrix(A(position(loop, 1.0))))
+            @test maximum(minimum(abs.(λ_dense .- λ)) for λ ∈ ends) < 1e-10
+        end
     end
 
 end

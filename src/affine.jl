@@ -93,12 +93,13 @@ which would corrupt A. Use `A(prm_P)` for an independent matrix.
 """
 work_matrix(A::AffineLiouvillian) = SparseMatrixCSC(size(A.L0)..., A.L0.colptr, A.L0.rowval, similar(nonzeros(A.L0)))
 
-# throws unless L is stored on the pattern of A (identical index arrays: O(1); otherwise compared)
-function check_pattern(L::SparseMatrixCSC, A::AffineLiouvillian)
+# throws unless L is stored on the pattern of A, an AffineLiouvillian or an FDLiouvillian (identical index arrays: O(1);
+# otherwise compared)
+function check_pattern(L::SparseMatrixCSC, A)
     S = A.L0
     (L.colptr === S.colptr && L.rowval === S.rowval) ||
         (size(L) == size(S) && L.colptr == S.colptr && rowvals(L) == rowvals(S)) ||
-        throw(ArgumentError("the matrix is not stored on the sparsity pattern of the AffineLiouvillian"))
+        throw(ArgumentError("the matrix is not stored on the sparsity pattern of the family"))
     return nothing
 end
 

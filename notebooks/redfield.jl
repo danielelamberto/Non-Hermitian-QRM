@@ -1,6 +1,7 @@
 # Bloch–Redfield master equation of the quantum Rabi model: our assembly (redfield_liouvillian) against QuantumToolbox's,
-# its fixed sparsity pattern and parity sectors, its spectrum against the Lindblad and dressed master equations, and
-# its smoothness in the parameters (the prerequisite of finite-difference tracking), at T = 0 and small T > 0.
+# its fixed sparsity pattern and parity sectors, its spectrum against the Lindblad and dressed master equations, its
+# smoothness in the parameters at T = 0 and small T > 0, and its tracking as a finite-difference family
+# (FDLiouvillian): the check of the step h, the error of the derivative against h, and a swap around an EP.
 # Cell script (#%% cells); the generic functions are in the package NonHermitianQRM (src/).
 
 #%% Packages
@@ -9,6 +10,7 @@
 using Revise
 using NonHermitianQRM
 using NonHermitianQRM: ohmic
+using NonHermitianQRM: Circle          # also exported by Makie: ours is the loop in parameter space
 using QuantumToolbox, CairoMakie, MakieStyles, LinearAlgebra, SparseArrays, Accessors
 figdir = joinpath(pkgdir(NonHermitianQRM), "figures")
 mkpath(figdir)
@@ -133,4 +135,64 @@ end
 axislegend(ax_c; position=:lt)
 linkxaxes!(ax_E, ax_c)
 save(joinpath(figdir, "redfield_smoothness.png"), fig)
+fig
+
+
+#%% Finite-difference family: the step h, and tracking around an EP
+
+# Redfield is not affine in (g, ωb): FDLiouvillian rebuilds L at every evaluation and differentiates it by central
+# differences along the path's velocity. Its constructor checks h at the reference point and at check_at (D(h) and
+# D(h/2) must agree to rtol = 1e-6 relative to the derivative), here near the JC EP₁ (g = γa/4, ωb = ωa), where weak
+# coupling Redfield should have an EP close to Lindblad's.
+# Left: ‖D(h) - D(h/2)‖/‖D‖ along g at (0.3, 0.9) against h, the error estimate of the check: truncation ∝ h² above
+# the optimum h ≈ 1e-5, round-off ∝ eps‖L‖/h below. Right: the pair nearest λ = -γa/4 - iω tracked around a circle
+# of radius 0.01 in (g, ωb), around the EP (it swaps: each eigenvalue ends where the other started) and beside it (each
+# comes back), with dense eigenvalues at a few points of the loops.
+Nc = 5
+â, σ̂ = qrm_operators(Nc)
+odd = odd_sector(Nc)
+q = QRM(ωa=1.0, ωb=1.0, γa=0.1, γb=0.0, Ta=0.02, Tb=0.02)
+L_gω(prm_P) = Redfield(â, σ̂, setproperties(q, (g=prm_P[1], ωb=prm_P[2]))).data[odd, odd]
+A = FDLiouvillian(L_gω, P2(0.3, 0.9); check_at=P2(0.025, 1.0))
+println("FDLiouvillian: h = $(A.h) validated, $(size(A.L0, 1)) states, $(nnz(A.L0)) stored entries")
+
+prm_P, e_g = P2(0.3, 0.9), P2(1.0, 0.0)
+D(h) = derivative(FDLiouvillian(L_gω, prm_P; h, check=false), prm_P, e_g)
+hs = 10.0 .^ range(-11, -1.5, 20)
+δs = [norm(D(h) - D(h/2))/norm(D(h)) for h ∈ hs]
+
+fig = Figure(size=(1000, 430))
+ax_h = Axis(fig[1, 1]; xlabel="h", ylabel="‖D(h) - D(h/2)‖/‖D‖", xscale=log10, yscale=log10,
+            title="Central difference along g: error estimate")
+scatterlines!(ax_h, hs, δs; color=clrs[:dark][:byzantine], label="Redfield QRM")
+above, below = filter(≥(1e-6), hs), filter(≤(1e-4), hs)                  # the guides, each in its regime
+lines!(ax_h, above, δs[end]*(above/hs[end]).^2; color=clrs[:dark][:subtext], linestyle=:dash, label="∝ h²")
+lines!(ax_h, below, δs[1]*hs[1]./below; color=clrs[:dark][:subtext], linestyle=:dot, label="∝ 1/h")
+hlines!(ax_h, [1e-6]; color=clrs[:dark][:helios], label="rtol of the check")
+vlines!(ax_h, [A.h]; color=clrs[:dark][:minthe], label="default h")
+axislegend(ax_h; position=:lb)
+
+λ_EP = -q.γa/4 - 1.0im
+ax_λ = Axis(fig[1, 2]; xlabel="Re λ", ylabel="Im λ", title="Pair near λ = -γa/4 - iω around a loop")
+for (k, (centre, name)) ∈ enumerate(((P2(0.025, 1.0), "around EP₁"), (P2(0.06, 1.0), "beside")))
+    loop = Circle(centre, 0.01)
+    pair = pair_near(A(position(loop, 0.0)), λ_EP)
+    ends = map(pair) do (λ0, r0)
+        sol, diag = track(A, loop, λ0, r0)
+        us = range(0, 1, 400)
+        lines!(ax_λ, real.(sol.(us; idxs=length(r0) + 1)), imag.(sol.(us; idxs=length(r0) + 1));
+               color=clrs[:dark][(:byzantine, :hyacinth)[k]], label=name)
+        println(name, ": ", diag.corrections, " steps, max residual before correction ", diag.max_residual)
+        sol.u[end][end]
+    end
+    swapped = argmin(abs.(first.(pair) .- ends[1])) == 2
+    println(name, ": swap ", swapped, ", start ", first.(pair), ", end ", ends)
+    for u ∈ range(0, 1, 9)[1:end-1]
+        λ = eigvals(Matrix(A(position(loop, u))))
+        λ = partialsort(λ, 1:2; by=l -> abs(l - λ_EP))
+        scatter!(ax_λ, real.(λ), imag.(λ); color=clrs[:dark][:text], markersize=6)
+    end
+end
+axislegend(ax_λ; position=:lt, unique=true)
+save(joinpath(figdir, "redfield_fd_tracking.png"), fig)
 fig

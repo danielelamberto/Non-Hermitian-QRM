@@ -224,9 +224,10 @@ seeds_rabi, cells_rabi, loc_rabi = tower_seeds(A_rabi, start_r)
 # Needs the previous cell. Left: the tracked scan of the slice (the grid xs_q × ys_q), its flagged cells (shaded: each
 # a clean swap of one or more pairs, so no refinement was needed) and the localised EPs (one per swapped pair, colour:
 # manifold n). Middle: the flagged cell of EP_n_zoom, with the lines tracked by the bracketing of each of its pairs
-# (colour: pair) and the rectangle kept at each iteration (thicker as they shrink): the first cuts at x* ± δ, y* ± δ
-# around the zero of the fit of D, then nested boxes. Right: zoom on the last iterations and the final boxes (size
-# tol = 1e-5), where the 3–4 pairs of EP_n_zoom sit apart (~1e-5 in δγ).
+# (colour: pair) and the rectangle kept at each iteration: the first cuts at x* ± δ, y* ± δ around the zero of the fit
+# of D, which already keep a small central box (the four pairs' first boxes nearly coincide), then the final ones.
+# Right: zoom on the final boxes only (filled, size ≤ tol = 1e-5), each with its pair's EP at its centre: the 3–4 pairs
+# of EP_n_zoom, which coincide in the JC limit, sit apart here.
 n_zoom = 3
 rect_pts(r) = Point2f[(r[1], r[3]), (r[2], r[3]), (r[2], r[4]), (r[1], r[4]), (r[1], r[3])]
 centre(r) = Point2f((r[1] + r[2])/2, (r[3] + r[4])/2)
@@ -249,27 +250,26 @@ end
 axislegend(ax_s; position=:rb, labelsize=10)
 es_zoom = filter(e -> manifold(e) == n_zoom, loc_rabi.eps)
 cell_zoom = es_zoom[1].cell
-ax_c = Axis(fig_seeds[1, 2]; xlabel="δω", ylabel="δγ", title="EP_$n_zoom: bracketing of its $(length(es_zoom)) pairs")
-ax_f = Axis(fig_seeds[1, 3]; xlabel="δω", ylabel="δγ", title="last iterations and final boxes")
+ax_c = Axis(fig_seeds[1, 2]; xlabel="δω", ylabel="δγ",
+            title="EP_$n_zoom's cell: cut lines and kept boxes of its $(length(es_zoom)) pairs")
+ax_f = Axis(fig_seeds[1, 3]; xlabel="δω", ylabel="δγ", title="zoom: final boxes, one per pair, and its EP (★)")
 for (k, e) ∈ enumerate(es_zoom)
     colour = pair_colours[mod1(k, length(pair_colours))]
     for (a, b) ∈ e.segments
         lines!(ax_c, [Point2f(a), Point2f(b)]; color=(colour, 0.5), linewidth=0.7)
     end
-    for (it, r) ∈ enumerate(e.history)
-        for ax ∈ (ax_c, ax_f)
-            lines!(ax, rect_pts(r); color=colour, linewidth=0.8 + 0.6it,
-                   label=(it == 1 ? "λ ≈ $(round(e.λ, digits=4))" : nothing))
-        end
+    for r ∈ e.history[2:end]                                   # history[1] is the cell itself
+        lines!(ax_c, rect_pts(r); color=colour, linewidth=1.5, label="λ ≈ $(round(e.λ, digits=4))")
     end
-    scatter!(ax_f, [centre(e.rect)]; color=colour, marker=:star5, markersize=14)
+    poly!(ax_f, rect_pts(e.rect); color=(colour, 0.25), strokecolor=colour, strokewidth=1.5)
+    scatter!(ax_f, [centre(e.rect)]; color=colour, marker=:star5, markersize=16)
 end
 limits!(ax_c, cell_zoom...)
-lasts = reduce(vcat, [e.history[max(1, end - 1):end] for e ∈ es_zoom])    # the last two rectangles of each pair
-lo_x, hi_x = minimum(r -> r[1], lasts), maximum(r -> r[2], lasts)
-lo_y, hi_y = minimum(r -> r[3], lasts), maximum(r -> r[4], lasts)
-pad_x, pad_y = 0.15*(hi_x - lo_x), 0.15*(hi_y - lo_y)
-limits!(ax_f, lo_x - pad_x, hi_x + pad_x, lo_y - pad_y, hi_y + pad_y)
+finals = [e.rect for e ∈ es_zoom]
+lo_x, hi_x = minimum(r -> r[1], finals), maximum(r -> r[2], finals)
+lo_y, hi_y = minimum(r -> r[3], finals), maximum(r -> r[4], finals)
+pad = 0.2*max(hi_x - lo_x, hi_y - lo_y)
+limits!(ax_f, lo_x - pad, hi_x + pad, lo_y - pad, hi_y + pad)
 Legend(fig_seeds[2, 2:3], ax_c; orientation=:horizontal, framevisible=false, labelsize=11, merge=true)
 fig_seeds
 

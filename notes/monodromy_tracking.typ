@@ -160,13 +160,33 @@
   = Relation to the discriminant method
   The coworker's `ep_search` (`functions_QRM.jl`) looks for zeros of the discriminant over a window of eigenvalues in a real (Hermitian-operator) basis, localises them by Newton, and classifies them (`check_ep`) by the exponent of the gap ($1\/2$ for an EP2, $1$ for a DP) and by the slope of the off-diagonal element $t$ of a $2 × 2$ Schur compression of the pair (0 for an EP2, 1 for a DP). On the mock it finds the four off-axis EP2 to $10^(-15)$, the real-axis EP2 line, and the DP to $1.4 × 10^(-12)$, but classifies the DP as inconclusive: there $t ≡ 0$ (the DP is normal), and the slope of $t$ is undefined. Normal DPs, and unresolved EP2 pairs, can explain inconclusive verdicts. The two methods are complementary: monodromy detects singularities through closed loops without landing on them, and cannot mistake a DP for an EP2; the discriminant method lands on them with high accuracy.
 
+  = Future work: the pair's invariant subspace
+  Two planned changes, each for its own branch, since both can fail in crowded spectra and need heavy testing there.
+
+  *Motivation.* With the GMRES solves, a step of the EP-line tracker on the full QRM ($N = 200$) costs about 58 ms: 22 ms for the check loop, and 23 ms for about 25 shift-inverts evaluating $D$ (Newton and tangent, by finite differences). Each shift-invert is a sparse LU, so at large $N$ they dominate.
+
+  *Compressed $2 × 2$ model.* As long as the pair is separated from the rest of the spectrum, its two-dimensional invariant subspace is well conditioned, even at the EP where its two eigenvectors become parallel. With $V$ an orthonormal basis of it (Schur vectors, not the eigenvectors of `pair_near`, which become degenerate), and $W$ a basis of the left subspace with $W^† V = I$, the matrix
+  $
+    M(P) = W^† L(P) V
+  $
+  has exactly the pair's eigenvalues at the point $P_0$ where $V, W$ are computed, and matches them to second order away from it (error $∼ (‖Δ L‖ |δ P|)^2 \/ "gap to the rest"$). Then $D = ("tr" M)^2 - 4 det M$, $λ_"EP" = "tr" M \/ 2$, and, $L$ being affine,
+  $
+    (∂ D)/(∂ P_k) = 2 "tr" M "tr" M_k - 4 "tr"("adj"(M) M_k), quad M_k = W^† L_k V,
+  $
+  exact, with no finite difference (and no finite-difference step to choose). Newton then needs one subspace computation per iteration instead of six shift-inverts, and the tangent comes free from the last one. $V$ and $W$ come from a few subspace iterations $Y ← F^(-1) Y$ (then $F^(-†)$ for $W$) with one LU $F$ of $L - σ$, $σ ≈ λ_"EP"$, started from the previous $V$: fast (the rate is the ratio of distances to $σ$), and unable to jump to another eigenvalue. A large $"cond"(W^† V)$ signals an eigenvalue coming close, and a fall back to the present finite differences.
+
+  *Continuing the subspace.* Following $V(u)$ along a path, with the pair's eigenvalues from the $2 × 2$ matrix $M(u)$, removes the $sqrt$ singularity of the individual eigenvectors near the EP: $V$ and $M$ are smooth through it. The swap is read on $D$: the pair swaps around a loop iff $D(u)$ winds an odd number of times around 0 (the `arg_increment` of the scan). One LU and a few solves per point, 16 to 32 points per loop whatever its radius, instead of a tracking that slows down near the EP. If the loop encloses an EP between a member of the pair and an outside eigenvalue, the subspace does not come back to itself after one turn: comparing $"span" V(1)$ with $"span" V(0)$ detects it explicitly, where the present check loop only misses the swap.
+
+  *Limits and tests.* Both need the pair isolated along the whole path: they suit the 3D tracker's corrector, its check loops and the bracketing near a known pair, not the scans, whose edges follow every eigenvalue of a window through crossings (those keep `track`). The tests should target crowded spectra: the full QRM at higher manifolds, the split pairs of one EP#sub[n] (about $10^(-5)$ apart, eigenvalues $3 × 10^(-3)$ apart), the tower lines converging at $g → 0$, and a mock block with an outside eigenvalue passing close to a pair.
+
   = Next steps
   - Kernel dimension at the leaves, to separate DPs from unresolved EP2 pairs.
   - Conjugate eigenvalues in the window, to test the real-axis EP lines; complexified parameter for codimension-1 EPs (single boson at $Q = 1\/2$).
   - A mock block with three coupled modes, to test the cycles.
   - Non-affine Liouvillians (Bloch–Redfield without `RWA_env`), for which $L'$ needs finite differences.
   - A solver that refactorises in place (KLU) for large $N$.
-  - The EP-line corrector still evaluates $D$ by shift-invert (about 25 per step, 40 % of a step with the new solves). A compressed $2 × 2$ model of the pair, $M = W^† L V$ on its invariant subspace, gives $D$ and its exact gradient from the affine terms $W^† L_k V$, with about 2 subspace computations per Newton iteration; continuing that subspace along paths would remove the shift-inverts altogether. Both need careful tests in crowded spectra.
+  - The compressed $2 × 2$ model and the continuation of the pair's subspace (see Future work).
+  - Parallel tracking of the independent half-lines of the EP-line tracker (28 s on one thread for the full QRM tower, about 8 s expected on four).
   - The loops of the scan applied to the QRM points that the discriminant method leaves inconclusive.
 
 ]

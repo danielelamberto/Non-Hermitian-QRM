@@ -244,13 +244,14 @@ function gmres_bordered!(S::StaleLU, L, λ, r, c, b)
     S.res .= b .- S.res
     β = norm(S.res)
     β ≤ S.rtol*nb && return S.x
-    V, H, g, cs, sn, w = S.V, S.H, S.g, S.cs, S.sn, S.dx
+    V, H, g, cs, sn = S.V, S.H, S.g, S.cs, S.sn
+    z, w = S.res, S.dx                                        # work vectors: F⁻¹ vⱼ and B F⁻¹ vⱼ
     @views V[:, 1] .= S.res ./ β
     fill!(g, 0)
     g[1] = β
     for j ∈ 1:S.maxiter
-        @views ldiv!(S.res, S.F, V[:, j])                     # S.res: work vector here
-        bordered_mul!(w, L, λ, r, c, S.res)
+        @views ldiv!(z, S.F, V[:, j])
+        bordered_mul!(w, L, λ, r, c, z)
         for i ∈ 1:j                                           # modified Gram–Schmidt
             @views H[i, j] = V[:, i] ⋅ w
             @views w .-= H[i, j] .* V[:, i]
@@ -271,8 +272,8 @@ function gmres_bordered!(S::StaleLU, L, λ, r, c, b)
         S.refinements += 1
         if abs(g[j + 1]) ≤ S.rtol*nb
             y = UpperTriangular(view(H, 1:j, 1:j)) \ view(g, 1:j)
-            @views mul!(S.res, V[:, 1:j], y)
-            ldiv!(w, S.F, S.res)
+            @views mul!(z, V[:, 1:j], y)                      # x = x0 + F⁻¹ V y
+            ldiv!(w, S.F, z)
             S.x .+= w
             j > S.early && refactorise!(S, L, λ, r, c)
             return S.x
@@ -343,9 +344,8 @@ Returns `(sol, diagnostics)`: λ(u) = sol(u)[end], r(u) = sol(u)[1:end-1].
 - `corrector`: Newton correction (`correct!`) after every accepted step, and reset of c to `normalisation(r)` when
   cos∠(c, r) = 1/(‖c‖‖r‖) < `reset_cos` (c'r = 1 is kept, r unchanged; ‖r‖ would grow otherwise).
 - `stale`: bordered systems solved with a `StaleLU` (false: a fresh factorisation at every solve); `gmres`: by GMRES
-  preconditioned by the stale factorisation (false: iterative refinement, which refactorises much more often near an
-  EP: ~2 factorisations per tracking instead of 50–250, 6–11× faster on 200–625 states, but slower on very small
-  matrices, ~20 states, where a factorisation costs less than the Krylov iterations).
+  preconditioned by the stale factorisation (false: iterative refinement, which diverges near an EP and refactorises
+  much more often: 50–250 factorisations per tracking instead of ~2; GMRES is 2–4× faster on 200–1600 states).
 - `diagnostics`: corrections, Newton iterations, largest residual before a correction, c resets, factorisations,
   refinements (GMRES or refinement iterations).
 
@@ -376,7 +376,9 @@ function track(A, p::ParamPath, λ0, r0; alg=Tsit5(), reltol=1e-6, abstol=1e-8, 
         λ, res0, it = correct!(r, evaluate!(L, A, position(p, integ.t)), integ.u[n + 1], c; tol, solver)
         integ.u[n + 1] = λ
         # the step was saved before this callback: store the corrected eigenpair there instead (sol.u exact)
-        isempty(integ.sol.t) || integ.sol.t[end] != integ.t || (integ.sol.u[end] .= integ.u)
+        if !isempty(integ.sol.t) && integ.sol.t[end] == integ.t
+            integ.sol.u[end] .= integ.u
+        end
         if 1/(norm(c)*norm(r)) < reset_cos
             c .= normalisation(r)
             diagnostics.resets[] += 1

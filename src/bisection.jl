@@ -159,12 +159,12 @@ end
 """
     disc_fit(A, lines, (x0, x1, y0, y1); k=4)
 
-Affine fit of the discriminant D = (λa - λb)² of the pair, read on the tracked lines along the sides of the rectangle
-(`k` points per side; the eigenpairs of the lines' dense output there are polished by Newton on `A`, so that the fit
-does not depend on the integrator's tolerance): D ≈ D0 + Dx (x - xc) + Dy (y - yc) around its centre, by least squares. D is smooth and vanishes
-linearly at an EP2, so the zero of the fit approximates the EP with an error ~ curvature × size². Returns (zero of the
-fit, error estimate: the largest residual of the fit over the smallest singular value of the real Jacobian of
-(Re D, Im D)).
+Affine fit of the discriminant D = (λa - λb)² of the pair, D ≈ D0 + Dx (x - xc) + Dy (y - yc) around the centre of
+the rectangle, by least squares on `k` points per side, read on the tracked lines along its sides (their dense output
+there is polished by Newton on `A`, so that the fit does not depend on the integrator's tolerance). D is smooth and
+vanishes linearly at an EP2, so the zero of the fit approximates the EP with an error ~ curvature × size². Returns
+(zero of the fit, error estimate: the largest residual of the fit over the smallest singular value of the real
+Jacobian of (Re D, Im D)).
 """
 function disc_fit(A, lines, (x0, x1, y0, y1); k=4)
     c = (P2(x0, y0), P2(x1, y0), P2(x1, y1), P2(x0, y1))
@@ -189,8 +189,8 @@ function disc_fit(A, lines, (x0, x1, y0, y1); k=4)
     coeffs = M \ Ds
     D0, Dx, Dy = coeffs
     J = [real(Dx) real(Dy); imag(Dx) imag(Dy)]
-    zero = xc + P2(J \ [-real(D0), -imag(D0)])
-    return zero, maximum(abs.(M*coeffs .- Ds))/minimum(svdvals(J))
+    P_fit = xc + P2(J \ [-real(D0), -imag(D0)])
+    return P_fit, maximum(abs.(M*coeffs .- Ds))/minimum(svdvals(J))
 end
 
 # positions of the cuts across [lo, hi] around the fitted zero p: p ± δ, kept if well inside (no sliver cells, no cut on
@@ -204,25 +204,31 @@ end
 """
     ep_bracket(A, rect, corner_targets; tol, maxiter=10, safety=2.0, threaded=true, kwargs...)
 
-Greedy variant of `ep_bisect`, from a rectangle `(x0, x1, y0, y1)` that swaps the pair, until its larger side is
-below `tol` (or `maxiter` iterations). Each iteration: the zero P* of the affine fit of D on the rectangle's sides
-(`disc_fit`: D is read on the tracked lines, almost free), and the lines x = x* ± δ, y = y* ± δ across the whole rectangle,
-with δ = `safety` × the fit's error estimate. They cut it into up to 9 cells, the central one a small rectangle around
-P*; every cell's sides lie on tracked lines, and exactly one cell swaps (the bracket is kept, as in the bisection).
-If the fit is right, the rectangle shrinks from size w to ~ w²; if the EP lies outside the central cell, an outer cell
-is kept and the next fit is made there. Without a usable fit (P* outside, or δ too large), the rectangle is
-quadrisected. The new lines are tracked in parallel if `threaded`. A cut that fails (EP too close to it) is retried
-with δ enlarged by 1.7, up to twice. `corner_targets(x)` gives the starting targets at the outer corners; `kwargs` are
-passed to `track`. Returns (final rectangle, rectangles at every iteration, all tracked lines), as `ep_bisect`.
+Greedy variant of `ep_bisect`, from a rectangle `(x0, x1, y0, y1)` that swaps the pair, until its larger side is below
+`tol` (or `maxiter` iterations). Each iteration: the zero P* of the affine fit of D on the rectangle's sides
+(`disc_fit`: D is read on the tracked lines, almost free), and the lines x = x* ± δ, y = y* ± δ across the whole
+rectangle, with δ = `safety` × the fit's error estimate. They cut it into up to 9 cells, the central one a small
+rectangle around P*; every cell's sides lie on tracked lines, and exactly one cell swaps (the bracket is kept, as in the
+bisection). If the fit is right, the rectangle shrinks from size w to ~ w²; if the EP lies outside the central cell, an
+outer cell is kept and the next fit is made there. Without a usable fit (P* outside, or δ too large), the rectangle is
+quadrisected. The new lines are tracked in parallel if `threaded`. A cut that fails (EP too close to it) is retried with
+δ enlarged by 1.7, up to twice. `corner_targets(x)` gives the starting targets at the outer corners; `kwargs` are passed
+to `track`. Returns (final rectangle, rectangles at every iteration, all tracked lines), as `ep_bisect`.
 """
 function ep_bracket(A, rect, corner_targets; tol, maxiter=10, safety=2.0, threaded=true, kwargs...)
     track_all(specs) = threaded ? fetch.([Threads.@spawn(track_line(A, a, b, tg; kwargs...)) for (a, b, tg) ∈ specs]) :
-                            [track_line(A, a, b, tg; kwargs...) for (a, b, tg) ∈ specs]
+                                  [track_line(A, a, b, tg; kwargs...) for (a, b, tg) ∈ specs]
     x0, x1, y0, y1 = rect
     c = (P2(x0, y0), P2(x1, y0), P2(x1, y1), P2(x0, y1))
     lines = TrackedLine[track_all([(c[1], c[2], corner_targets(c[1])), (c[2], c[3], corner_targets(c[2])),
-                             (c[4], c[3], corner_targets(c[4])), (c[1], c[4], corner_targets(c[1]))])...]
-    rect_swaps(lines, rect) || error("the initial rectangle does not swap the pair: no (or an even number of) EP inside")
+                                   (c[4], c[3], corner_targets(c[4])), (c[1], c[4], corner_targets(c[1]))])...]
+    rect_swaps(lines, rect) ||
+        error("the initial rectangle does not swap the pair: no (or an even number of) EP inside")
+    # the two branches at the point a of a side, read on the tracked line through a and the side's other end b
+    function branches_at(a, b)
+        l, s, _ = find_line(lines, a, b)
+        return [branch(l, j, s) for j ∈ 1:2]
+    end
     history = [rect]
     for it ∈ 1:maxiter
         x0, x1, y0, y1 = rect
@@ -232,11 +238,9 @@ function ep_bracket(A, rect, corner_targets; tol, maxiter=10, safety=2.0, thread
         for attempt ∈ 0:2
             xs, ys = bracket_cuts(x0, x1, P[1], δ), bracket_cuts(y0, y1, P[2], δ)
             try
-                # starting targets of a cut: the two branches of the side it starts on (bottom or left)
-                side_branches(a, b_side) = (l_s = find_line(lines, a, b_side); [branch(l_s[1], j, l_s[2]) for j ∈ 1:2])
-                specs = [[(P2(m, y0), P2(m, y1), side_branches(P2(m, y0), P2(x1, y0))) for m ∈ xs];
-                         [(P2(x0, m), P2(x1, m), side_branches(P2(x0, m), P2(x0, y1))) for m ∈ ys]]
-                new = track_all(specs)
+                # vertical cuts start on the bottom side, horizontal ones on the left side
+                new = track_all([[(P2(m, y0), P2(m, y1), branches_at(P2(m, y0), P2(x1, y0))) for m ∈ xs];
+                                 [(P2(x0, m), P2(x1, m), branches_at(P2(x0, m), P2(x0, y1))) for m ∈ ys]])
                 bx, by = [x0; xs; x1], [y0; ys; y1]
                 cells = [(bx[i], bx[i + 1], by[j], by[j + 1]) for i ∈ 1:length(bx) - 1 for j ∈ 1:length(by) - 1]
                 sw = [rect_swaps([lines; new], cl) for cl ∈ cells]

@@ -138,6 +138,25 @@ end
         @test !any(flagged, cells) && all(cell -> cell.lost == 0, cells)
     end
 
+    @testset "bordered solves: stale LU with GMRES or refinement" begin
+        # B at a point near an EP of the mock, factorised; then solved at a drifted point from the stale factorisation
+        ep = only(filter(p -> p.block == 2 && p.y < 0.7, pts))
+        (λ, r), _ = dimer_pairs(P2(ep.x + 0.003, ep.y), 2)
+        c = NonHermitianQRM.normalisation(r)
+        b = [r; 1.0] .+ 0.1                                    # a generic right-hand side
+        L0, L1 = A_mock(P2(ep.x + 0.003, ep.y)), A_mock(P2(ep.x + 0.004, ep.y + 0.001))
+        exact = NonHermitianQRM.bordered(L1, λ + 1e-3, r, c) \ b
+        for (label, S) ∈ (("GMRES", StaleLU()), ("refinement", StaleLU(method=:richardson)),
+                          ("GMRES, maxiter 1: refactorises", StaleLU(maxiter=1)),
+                          ("GMRES, early 0: refactorises after", StaleLU(early=0)))
+            NonHermitianQRM.solve_bordered!(S, L0, λ, r, c, b)  # the first solve factorises
+            x = copy(NonHermitianQRM.solve_bordered!(S, L1, λ + 1e-3, r, c, b))
+            @test norm(x - exact) ≤ 1e-10*norm(exact)
+            label == "GMRES" && @test S.factorisations == 1
+            startswith(label, "GMRES, ") && @test S.factorisations == 2
+        end
+    end
+
     @testset "tracking scan (mock)" begin
         F = eigen(Matrix(A_mock(P2(0, 0))))
         start = [(F.values[k], F.vectors[:, k]) for k ∈ findall(λ -> imag(λ) > 1e-8, F.values)]
@@ -217,6 +236,25 @@ end
         line_nf = track_ep_line(A, P0, λ_EP(P0); h=0.02, nsteps=5, newton_first=false)
         line_n = track_ep_line(A, P0, λ_EP(P0); h=0.02, nsteps=5)
         @test maximum(norm.(line_nf.points .- line_n.points)) < 1e-12
+        # the pair of each check loop is carried from the previous one; without carrying, the same line
+        line_c = track_ep_line(A, P0, λ_EP(P0); h=0.02, nsteps=6)
+        line_s = track_ep_line(A, P0, λ_EP(P0); h=0.02, nsteps=6, continue_pair=false)
+        @test line_c.counts.carried == line_c.counts.newton - 1 && line_s.counts.carried == 0
+        @test maximum(norm.(line_c.points .- line_s.points)) < 1e-12
+        # check_loop at the exact EP: with a carried pair, without one, and with a carry that cannot be continued
+        # (the same eigenpair twice): it falls back to the pair's model; every loop swaps
+        plane = NonHermitianQRM.NormalPlane(P_ex, P3(1, -P_ex[2]/P_ex[1], 2P_ex[1] + 2P_ex[2]^2/P_ex[1]))
+        newton = NonHermitianQRM.newton_in_plane(slice(A, plane), λ_EP(P_ex); reach=0.01, fd=1e-6, xtol=1e-12)
+        @test newton.converged && norm(newton.ξ) < 1e-10
+        loop0, pairs0, carried0 = NonHermitianQRM.check_loop(A, plane, newton.ξ, 1e-3, nothing, newton.model)
+        start0 = position(loop0, 0.0)
+        shifted = NonHermitianQRM.NormalPlane(P_ex + 1e-3*plane.t̂, plane.t̂)       # a nearby plane, as at the next step
+        loop1, pairs1, carried1 = NonHermitianQRM.check_loop(A, shifted, P2(0, 0), 1e-3, (x=start0, pairs=pairs0),
+                                                             newton.model)
+        loop2, pairs2, carried2 = NonHermitianQRM.check_loop(A, plane, newton.ξ, 1e-3,
+                                                             (x=start0, pairs=[pairs0[1], pairs0[1]]), newton.model)
+        @test !carried0 && carried1 && !carried2
+        @test all(((q, ps),) -> pair_swaps(A, q, ps), ((loop0, pairs0), (loop1, pairs1), (loop2, pairs2)))
         # slice of a non-affine family (generic method): the same matrices as the affine slice
         e1, e2 = plane_basis(P3(0.3, 0.2, 1.0))
         R = Reparametrised(A, ξ -> ξ)
@@ -228,6 +266,9 @@ end
         @test line.status == :max_steps
         @test all(P -> norm(P[1:2] - SVector(ep.x, ep.y)) < 1e-9, line.points) && abs(line.points[end][3] - 0.3) > 0.2
         @test maximum(abs.(line.λs .- ep.λ)) < 1e-9
+        # the corrector's bracketing path on a Liouvillian (no Newton-first): lands on the line
+        c = ep_correct(A3, P3(ep.x + 0.002, ep.y - 0.001, 0.3), P3(0, 0, 1), ep.λ; w=0.01, newton_first=false)
+        @test c.path == :bracket && norm(c.P[1:2] - SVector(ep.x, ep.y)) < 1e-9 && abs(c.λ - ep.λ) < 1e-9
     end
 
     @testset "boson dimer: Lindblad modes = roots of disc" begin

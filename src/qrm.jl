@@ -15,7 +15,7 @@ H = ωa a†a + ωb σz/2 - i g (a - a†) σx + ε σx.
 - `RWA_coupling`: Jaynes–Cummings coupling -i g (a σ+ - a† σ-), which conserves N = a†a + σ+σ- (unitarily equivalent to
   g(a σ+ + a† σ-) by a → i a). The bias ε σx breaks that conservation: it must be 0.
 - `RWA_env`: local Lindblad dissipators (`Lindbladian`); otherwise the dressed non-secular master equation
-  (`DressedLiouvillian`), the coworker's `gen_liouvillian_QRM`.
+  (`DressedLiouvillian`), the coworker's `gen_liouvillian_QRM`, or the Bloch–Redfield one (`Redfield`).
 Rates are energy-decay rates (the community convention): the photon decays with jump operator √γa a, the qubit with
 √γb σ-, at the bath temperatures Ta (photon) and Tb (qubit). The operators are built by `qrm_operators`.
 """
@@ -91,6 +91,21 @@ function DressedLiouvillian(â::QuantumObject, σ̂::QuantumObject, mdl::QRM; kw
     γa > 0 && (push!(fields, √(γa/ωa)*(â + â')); push!(Ts, Ta))
     γb > 0 && (push!(fields, √(γb/ωb)*(σ̂ + σ̂')); push!(Ts, Tb))
     return liouvillian_dressed_nonsecular(Hamiltonian(â, σ̂, mdl), fields, Ts; kwargs...)
+end
+
+"""
+    Redfield(â, σ̂, mdl::QRM)
+
+Non-secular Bloch–Redfield Liouvillian (`redfield_liouvillian`), in the Fock basis, with the baths of
+`DressedLiouvillian`: the cavity couples through a + a† with the Ohmic spectrum of κ = γa/ωa at Ta, the qubit
+through σx with κ = γb/ωb at Tb, so that the decay rates of the bare excitations are γa and γb. Both baths are kept
+even at zero rate, so that the pattern of L does not depend on the parameters. Smooth in the parameters for Ta, Tb > 0;
+at T = 0 the spectrum has a kink at ω = 0, and L one wherever two levels coupled by the bath cross.
+"""
+function Redfield(â::QuantumObject, σ̂::QuantumObject, mdl::QRM)
+    (;ωa, ωb, γa, γb, Ta, Tb) = mdl
+    bths = [(â + â', ohmic(γa/ωa, Ta)), (σ̂ + σ̂', ohmic(γb/ωb, Tb))]
+    return redfield_liouvillian(Hamiltonian(â, σ̂, mdl), bths)
 end
 
 ## Excitation-number sectors

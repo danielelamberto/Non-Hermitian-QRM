@@ -35,7 +35,9 @@ tracking.jl                                         follow one eigenpair along a
 
 - `models.jl`: the models (`Boson`, `BosonDimer`, `Duffing`, `Optomech`) with their approximations (`RWA_env`,
   `RWA_coupling`, …), and their analytic response: `D_R`, the characteristic polynomial `disc`, analytic `EP`s.
-- `master_equations.jl`: `Lindbladian`, `Redfield`, `DressedLiouvillian`, modes and symmetry sectors.
+- `master_equations.jl`: `Lindbladian`, `Redfield`, `DressedLiouvillian`, modes and symmetry sectors. Redfield is
+  assembled here (`redfield_liouvillian`, in the Fock basis, on a pattern fixed by the coupling operators), checked
+  against QuantumToolbox's `bloch_redfield_tensor`.
 - `mock.jl`: `MockLiouvillian`, a direct sum of small blocks with exactly known spectrum and planted singularities
   (EP2s, a DP, a real-axis EP line, a DP line): the test bed of every algorithm below.
 - `qrm.jl`: the quantum Rabi model (`QRM`), its Jaynes–Cummings limit and closed forms (`jc_spectrum`, `jc_EP`),

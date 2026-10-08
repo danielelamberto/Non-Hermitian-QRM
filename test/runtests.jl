@@ -1,8 +1,9 @@
 # Checks of the package against exactly known cases: the mock Liouvillian (closed-form spectrum, planted singularities)
-# and the Lindblad boson dimer (modes from the characteristic polynomial disc). About a minute on one thread.
+# and the Lindblad boson dimer (modes from the characteristic polynomial disc), and our Redfield assembly against
+# QuantumToolbox's. About a minute on one thread.
 using Test
 using NonHermitianQRM
-using NonHermitianQRM: Circle, SVector
+using NonHermitianQRM: Circle, SVector, ohmic, temperature
 using QuantumToolbox, LinearAlgebra, SparseArrays, Accessors
 
 mock = MockLiouvillian()
@@ -370,6 +371,29 @@ end
             k = findfirst(c -> c.rect[1] ≤ g ≤ c.rect[2] && c.rect[3] ≤ ωb ≤ c.rect[4], leaves)
             @test k !== nothing && length(leaves[k].swaps) == (n ∈ (1, Nc - 1) ? 3 : 4) && isempty(leaves[k].windings)
         end
+    end
+
+    @testset "Bloch–Redfield: own assembly = QuantumToolbox's bloch_redfield_tensor" begin
+        br_tensor(Ĥ, bths, c_ops=nothing) = bloch_redfield_tensor(Ĥ, bths, c_ops; sec_cutoff=-1, fock_basis=Val(true))
+        same(L, R) = L.dimensions == R.dimensions && norm(L.data - R.data) < 1e-13*norm(R.data)
+        # QRM, both baths at finite temperature, parity broken by ε
+        Nc = 6
+        â, σ̂ = qrm_operators(Nc)
+        q = QRM(ωa=1.0, ωb=0.9, g=0.3, γa=0.05, γb=0.02, Ta=0.05, Tb=0.03, ε=0.07)
+        L = Redfield(â, σ̂, q)
+        @test same(L, br_tensor(Hamiltonian(â, σ̂, q), [(â + â', ohmic(q.γa/q.ωa, q.Ta)), (σ̂ + σ̂', ohmic(q.γb/q.ωb, q.Tb))]))
+        # the pattern depends on neither H nor the spectra (here g = 0, zero rate, T = 0)
+        L2 = Redfield(â, σ̂, QRM(ωa=1.0, ωb=1.2, g=0.0, γa=0.0, γb=0.02))
+        @test L2.data.colptr == L.data.colptr && rowvals(L2.data) == rowvals(L.data)
+        # boson dimer at T = 0
+        n = 4
+        â, b̂ = destroy(n) ⊗ eye(n), eye(n) ⊗ destroy(n)
+        d = BosonDimer(ωa=1.0, ωb=1.1, γa=0.1, γb=0.05, g=0.2, approx=[])
+        @test same(Redfield(â, b̂, d), br_tensor(Hamiltonian(â, b̂, d), [(â + â', ohmic(2d.γa/d.ωa, 0.0)), (b̂ + b̂', ohmic(2d.γb/d.ωb, 0.0))]))
+        # optomechanics: Redfield mechanics, Lindblad cavity (c_ops)
+        o = Optomech(ωb=1.0, γa=0.1, γb=0.05, g=0.1, Δ=-1.0, F=0.2, nBa=0.1, nBb=0.2, approx=[])
+        c_ops = [√(2o.γa*(1 + o.nBa))*â, √(2o.γa*o.nBa)*â']
+        @test same(Redfield(â, b̂, o), br_tensor(Hamiltonian(â, b̂, o), [(b̂ + b̂', ohmic(2o.γb/o.ωb, temperature(o.nBb, o.ωb)))], c_ops))
     end
 
 end

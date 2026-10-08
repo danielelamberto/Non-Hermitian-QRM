@@ -346,3 +346,43 @@ function track_ep_line(A, prm_P0::P3, σ0; h, direction=1, nsteps=200, hmin=h/64
     return EPLine(points, λs, tangents, status,
                   (; (k => counts[k] for k ∈ (:newton, :bracket, :failed, :turned, :carried))...))
 end
+
+"""
+    track_ep_lines(A, seeds; ntasks=4, kwargs...)
+
+Tracks the EP lines through several `seeds` (pairs `(prm_P0, σ0)`, as for `track_ep_line`), each in both directions:
+one task per half-line, at most `ntasks` at a time (on as many Julia threads as available: start Julia with
+`--threads=ntasks` at least). The half-lines are independent, each with its own solvers; BLAS is set to one thread
+meanwhile (restored after), so that the sparse factorisations of the tasks do not oversubscribe the cores. `kwargs`
+are passed to `track_ep_line`. Returns, per seed, `(forward, backward)`: the `EPLine`s with direction +1 and -1
+(see `join_halves`).
+"""
+function track_ep_lines(A, seeds; ntasks=4, kwargs...)
+    jobs = [(k, direction) for k ∈ eachindex(seeds) for direction ∈ (1, -1)]
+    slots = Base.Semaphore(ntasks)
+    blas_threads = BLAS.get_num_threads()
+    BLAS.set_num_threads(1)
+    halves = try
+        tasks = map(jobs) do (k, direction)
+            Threads.@spawn Base.acquire(slots) do
+                prm_P0, σ0 = seeds[k]
+                track_ep_line(A, prm_P0, σ0; direction, kwargs...)
+            end
+        end
+        fetch.(tasks)
+    finally
+        BLAS.set_num_threads(blas_threads)
+    end
+    return [(forward=halves[2k - 1], backward=halves[2k]) for k ∈ eachindex(seeds)]
+end
+
+"""
+    join_halves(forward, backward)
+
+The two halves of an EP line (`EPLine`s from the same seed, directions +1 and -1) as one line, `(points, λs,
+tangents)`, running from the end of `backward` through the seed to the end of `forward`, the tangents along that
+direction.
+"""
+join_halves(forward::EPLine, backward::EPLine) =
+    (points=[reverse(backward.points); forward.points[2:end]], λs=[reverse(backward.λs); forward.λs[2:end]],
+     tangents=[-reverse(backward.tangents); forward.tangents[2:end]])

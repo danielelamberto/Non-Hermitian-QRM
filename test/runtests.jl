@@ -236,6 +236,17 @@ end
         line_nf = track_ep_line(A, P0, λ_EP(P0); h=0.02, nsteps=5, newton_first=false)
         line_n = track_ep_line(A, P0, λ_EP(P0); h=0.02, nsteps=5)
         @test maximum(norm.(line_nf.points .- line_n.points)) < 1e-12
+        # several lines, half-lines as parallel tasks: the same as tracked one by one; joined through the seed
+        seeds = [(P0, λ_EP(P0)), (P_ex + P3(-0.002, 0.001, 0.002), λ_EP(P_ex))]
+        par = track_ep_lines(A, seeds; h=0.02, nsteps=5)
+        for (k, (P_s, σ_s)) ∈ enumerate(seeds), (half, direction) ∈ ((:forward, 1), (:backward, -1))
+            @test maximum(norm.(getfield(par[k], half).points .-
+                                track_ep_line(A, P_s, σ_s; h=0.02, nsteps=5, direction).points)) < 1e-12
+        end
+        joined = join_halves(par[1]...)
+        @test length(joined.points) == length(par[1].forward.points) + length(par[1].backward.points) - 1
+        @test norm(joined.points[length(par[1].backward.points)] - par[1].forward.points[1]) < 1e-12   # the seed
+        @test all(k -> joined.tangents[k] ⋅ (joined.points[k + 1] - joined.points[k]) > 0, 1:length(joined.points) - 1)
         # the pair of each check loop is carried from the previous one; without carrying, the same line
         line_c = track_ep_line(A, P0, λ_EP(P0); h=0.02, nsteps=6)
         line_s = track_ep_line(A, P0, λ_EP(P0); h=0.02, nsteps=6, continue_pair=false)

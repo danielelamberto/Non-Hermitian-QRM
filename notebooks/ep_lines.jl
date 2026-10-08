@@ -1,6 +1,7 @@
 # EP lines in three-parameter spaces (δω, δγ, g): continuation of the complex EP of the Lindblad boson dimer, then of
 # the tower of EPs of the quantum Rabi model, in its Jaynes–Cummings limit (RWA_coupling) and with the full coupling.
 # Cell script (#%% cells); the generic functions are in the package NonHermitianQRM (src/, here epline.jl).
+# Start Julia with --threads=4: the half-lines of the EP lines are tracked in parallel (track_ep_lines).
 
 #%% Packages
 
@@ -9,18 +10,17 @@ using Revise
 using NonHermitianQRM
 using QuantumToolbox, CairoMakie, MakieStyles, LinearAlgebra, Accessors
 
-# Both halves of the EP line through `seed` (track_ep_line with direction ±1, `kwargs` passed on), joined into one
-# (points, λs, tangents) running from the end of direction -1 to the end of direction +1.
-function track_both(A, seed, σ; label="", kwargs...)
-    h1, h2 = map([1, -1]) do direction
-        t = @elapsed line = track_ep_line(A, seed, σ; direction, kwargs...)
-        println(label, ", direction $direction: $(length(line.points)) points, status $(line.status), g from ",
-                round(line.points[1][3], sigdigits=3), " to ", round(line.points[end][3], sigdigits=3), ", ",
-                round(t, digits=1), " s")
-        line
+# The EP lines through `seeds` ((prm_P0, σ0) pairs), their half-lines tracked in parallel (`track_ep_lines`: start
+# Julia with --threads=4), each joined into one (points, λs, tangents); one printed line per half-line, with `labels`.
+function track_lines(A, seeds, labels; kwargs...)
+    t = @elapsed halves = track_ep_lines(A, seeds; kwargs...)
+    for (label, hv) ∈ zip(labels, halves), (direction, l) ∈ ((1, hv.forward), (-1, hv.backward))
+        println(label, ", direction $direction: $(length(l.points)) points, status $(l.status), g from ",
+                round(l.points[1][3], sigdigits=3), " to ", round(l.points[end][3], sigdigits=3))
     end
-    return (points=[reverse(h2.points); h1.points[2:end]], λs=[reverse(h2.λs); h1.λs[2:end]],
-            tangents=[-reverse(h2.tangents); h1.tangents[2:end]])
+    println(length(seeds), " lines (", 2length(seeds), " half-lines) in ", round(t, digits=1), " s, ",
+            Threads.nthreads(), " threads")
+    return [join_halves(hv...) for hv ∈ halves]
 end
 
 
@@ -67,8 +67,8 @@ end
 # g ∈ [-0.06, 0.16] (γb = γ0 - δγ stays positive for |δγ| < 0.08), so the lines cross the DP at the origin and continue
 # a little into g < 0.
 bounds = (P3(-0.05, -0.09, -0.06), P3(0.05, 0.09, 0.16))
-ep_lines = [track_both(A3, seed, λ_exact(seed); label="seed δγ = $(round(seed[2], digits=4))", h=0.01, nsteps=60,
-                       bounds) for seed ∈ seeds]
+ep_lines = track_lines(A3, [(seed, λ_exact(seed)) for seed ∈ seeds],
+                       ["seed δγ = $(round(seed[2], digits=4))" for seed ∈ seeds]; h=0.01, nsteps=60, bounds)
 for (k, l) ∈ enumerate(ep_lines)
     σ = sign(l.points[end][2]*l.points[end][3])                            # g = 2σδγ on this line
     println("line $k (g = $(σ > 0 ? "" : "-")2δγ): max |δω| = ", round(maximum(abs.(getindex.(l.points, 1))), sigdigits=2),
@@ -173,10 +173,13 @@ seeds_jc = tower_seeds(A_jc, collect(zip(F_jc.values, eachcol(F_jc.vectors))))
 # the closed form: δω = 0, g = δγ/(2√n), and the coalesced eigenvalue = midpoint of the two closed-form eigenvalues
 # nearest it (comparing with one of them would show their √ splitting at the tracked point instead).
 bounds_q = (P3(-0.01, -0.048, 0.002), P3(0.01, 0.048, 0.03))
-tower_line(A, s; label) = merge((n=round(Int, s.n),), track_both(A, s.seed, sum(s.swaps[1])/2;
-                                                                 label="$label, n = $(round(Int, s.n))", h=0.002,
-                                                                 hmax=0.002, nsteps=80, bounds=bounds_q))
-lines_jc = [tower_line(A_jc, s; label="JC") for s ∈ seeds_jc]
+# the tower lines through the seeds `ss` (one swapped pair each), with their manifold n
+function tower_lines(A, ss, labels)
+    ls = track_lines(A, [(s.seed, sum(s.swaps[1])/2) for s ∈ ss], labels; h=0.002, hmax=0.002, nsteps=80,
+                     bounds=bounds_q)
+    return [merge((n=round(Int, s.n),), l) for (s, l) ∈ zip(ss, ls)]
+end
+lines_jc = tower_lines(A_jc, seeds_jc, ["JC, n = $(round(Int, s.n))" for s ∈ seeds_jc])
 function jc_midpoint(prm_P, λ)
     sp = jc_spectrum(qrm_at(jc, prm_P), Nc_jc; k=1)
     return sum(sp[partialsortperm(abs.(sp .- λ), 1:2)])/2
@@ -212,7 +215,8 @@ seeds_rabi = tower_seeds(A_rabi, start_r)
 
 # one seed per swapped pair, each pair once (a pair swaps in a single leaf)
 pair_seeds = [(seed=s.seed, n=s.n, swaps=[sw]) for s ∈ seeds_rabi for sw ∈ s.swaps]
-lines_rabi = [tower_line(A_rabi, s; label="QRM, λ_EP ≈ $(round(sum(s.swaps[1])/2, digits=4))") for s ∈ pair_seeds]
+lines_rabi = tower_lines(A_rabi, pair_seeds,
+                         ["QRM, n = $(round(Int, s.n)), λ_EP ≈ $(round(sum(s.swaps[1])/2, digits=4))" for s ∈ pair_seeds])
 # independent check: dense eigenvalues of the sector at the tracked points, the pair nearest λ: its gap (~√|D| at the
 # point: ~1e-8 for D at round-off) and the distance of its midpoint to λ
 function dense_check(A, prm_P, λ)

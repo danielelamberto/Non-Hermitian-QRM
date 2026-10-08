@@ -61,6 +61,7 @@ export TrackedLine, branch, track_line, pair_midpoint, rect_swaps, ep_bisect, di
 # scan.jl
 export NodeLabel, TrackedEdge, TrackedGrid, ScanCell, flagged, track_edge, track_grid, tracked_scan, refine_tracked
 # epline.jl
-export pair_disc, disc_gradient, ep_tangent, ep_newton, pair_swaps, ep_correct, EPLine, track_ep_line
+export pair_disc, disc_gradient, ep_tangent, ep_newton, pair_swaps, ep_correct, EPLine, track_ep_line, track_ep_lines,
+       join_halves
 
 end

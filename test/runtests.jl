@@ -432,6 +432,20 @@ end
             λ_dense = eigvals(Matrix(A(position(loop, 1.0))))
             @test maximum(minimum(abs.(λ_dense .- λ)) for λ ∈ ends) < 1e-10
         end
+        # an EP line of the full QRM with Lindblad baths (affine), in (δω, δγ, g) as in ep_lines.jl: the finite-
+        # difference family on the same builder follows it step for step (dL differs by round-off only). Seed: EP_1
+        # of a pair near the JC estimate δω = 0, δγ = 2g, by the corrector in the slice g = 0.008.
+        Nc = 6
+        â, σ̂ = qrm_operators(Nc)
+        odd = sort(reduce(vcat, excitation_sector(Nc, k) for k ∈ -Nc:Nc if isodd(k)))
+        qrm_at(prm_P) = setproperties(QRM(approx=[RWA_env]), (ωa=1 + prm_P[1], ωb=1 - prm_P[1], γa=0.05 + prm_P[2],
+                                                             γb=0.05 - prm_P[2], g=prm_P[3]))
+        L_lind(prm_P) = liouvillian(Lindbladian(â, σ̂, qrm_at(prm_P))...).data[odd, odd]
+        A_aff, A_fd = AffineLiouvillian(L_lind, 3; h=0.01), FDLiouvillian(L_lind, P3(0, 0.016, 0.008))
+        seed = ep_correct(A_aff, P3(0, 0.016, 0.008), P3(0, 0, 1), -0.025 - 1.0im; w=0.002)
+        l_aff, l_fd = [track_ep_line(A, seed.P, seed.λ; h=0.002, hmax=0.002, nsteps=6) for A ∈ (A_aff, A_fd)]
+        @test length(l_fd.points) == length(l_aff.points) ≥ 5
+        @test maximum(norm.(l_fd.points .- l_aff.points)) < 1e-12 && maximum(abs.(l_fd.λs .- l_aff.λs)) < 1e-10
     end
 
 end

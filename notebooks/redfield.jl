@@ -1,7 +1,8 @@
 # Bloch–Redfield master equation of the quantum Rabi model: our assembly (redfield_liouvillian) against QuantumToolbox's,
 # its fixed sparsity pattern and parity sectors, its spectrum against the Lindblad and dressed master equations, its
 # smoothness in the parameters at T = 0 and small T > 0, and its tracking as a finite-difference family
-# (FDLiouvillian): the check of the step h, the error of the derivative against h, and a swap around an EP.
+# (FDLiouvillian): the check of the step h, the error of the derivative against h, a swap around an EP, and the
+# first EP lines of the full QRM tower with Redfield baths, against the Lindblad ones (as in ep_lines.jl).
 # Cell script (#%% cells); the generic functions are in the package NonHermitianQRM (src/).
 
 #%% Packages
@@ -195,4 +196,88 @@ for (k, (centre, name)) ∈ enumerate(((P2(0.025, 1.0), "around EP₁"), (P2(0.0
 end
 axislegend(ax_λ; position=:lt, unique=true)
 save(joinpath(figdir, "redfield_fd_tracking.png"), fig)
+fig
+
+
+#%% EP lines of the full QRM with Redfield baths: seeds
+
+# The setup of ep_lines.jl (full coupling): odd sector, Nc = 10, ωa,b = ω0 ± δω, γa,b = γ0 ± δγ, coupling g, tower of
+# EP_n near δω = 0, g = δγ/(2√n), seeds in the slice g = g0. A Redfield scan of that slice would cost ~100× the
+# Lindblad one (18 s): instead, the Lindblad seeds (scan and localise_eps on the affine family), then the Redfield EP
+# of the same pair from each, by the corrector of the line tracker in the slice (ep_correct with normal t = ĝ: Newton
+# on D from the Lindblad seed, certified by a check loop that swaps the pair, bracketing otherwise). Two seeds: one
+# pair of EP_1 and one of EP_2. Redfield at T = 0.02: smooth (h checked inside the tower region), with thermal
+# occupations e^(-50) at ω ≈ 1, so the rates are those of T = 0.
+Nc = 10
+â, σ̂ = qrm_operators(Nc)
+odd = odd_sector(Nc)
+ω0, γ0, g0, T_R = 1.0, 0.05, 0.008, 0.02
+qrm_at(mdl, prm_P) = setproperties(mdl, (ωa=ω0 + prm_P[1], ωb=ω0 - prm_P[1], γa=γ0 + prm_P[2], γb=γ0 - prm_P[2],
+                                         g=prm_P[3]))
+slice_g0(A) = slice(A, P3(0, 0, g0), P3(1, 0, 0), P3(0, 1, 0))
+A_lind = AffineLiouvillian(prm_P -> liouvillian(Lindbladian(â, σ̂, qrm_at(QRM(approx=[RWA_env]), prm_P))...).data[odd, odd],
+                           3; h=0.01)
+A_red = FDLiouvillian(prm_P -> Redfield(â, σ̂, qrm_at(QRM(Ta=T_R, Tb=T_R), prm_P)).data[odd, odd], P3(0, 0.016, g0);
+                      check_at=P3(0.002, 0.03, 0.02))
+
+xs_s, ys_s = range(-0.0031, 0.0029, 7), range(0.0043, 0.0373, 21)       # as ep_lines.jl: n ≤ 5, no node on δω = 0
+F = eigen(Matrix(slice_g0(A_lind)(P2(xs_s[1], ys_s[1]))))
+start = [(F.values[k], F.vectors[:, k]) for k ∈ findall(λ -> -1.5 < imag(λ) < -0.5, F.values)]
+t = @elapsed loc_lind = localise_eps(slice_g0(A_lind), tracked_scan(slice_g0(A_lind), xs_s, ys_s, start); box_tol=1e-5)
+println("Lindblad: $(length(loc_lind.eps)) EPs in the slice g = $g0, ", round(t, digits=1), " s")
+box_centre(e) = P3((e.rect[1] + e.rect[2])/2, (e.rect[3] + e.rect[4])/2, g0)
+manifold_of(P) = round(Int, (P[2]/(2g0))^2)
+picked = [argmin(e -> abs(e.λ - λ), loc_lind.eps) for λ ∈ (-0.025 - 1.0im, -0.0783 - 1.0001im)]   # EP_1, EP_2
+seeds_lind = [(box_centre(e), e.λ) for e ∈ picked]
+seeds_red = map(seeds_lind) do (prm_P, λ)
+    t = @elapsed c = NonHermitianQRM.ep_correct(A_red, prm_P, P3(0, 0, 1), λ; w=0.005)
+    println("EP_$(manifold_of(prm_P)): Lindblad (δω, δγ) = ", round.(prm_P[1:2], sigdigits=5), ", λ = ", round(λ, digits=5),
+            ";  Redfield ", round.(c.P[1:2], sigdigits=5), ", λ = ", round(c.λ, digits=5), " (", c.path, ", ",
+            round(t, digits=1), " s)")
+    (c.P, c.λ)
+end
+
+
+#%% EP lines of the full QRM with Redfield baths: continuation
+
+# Needs the previous cell. Both lines tracked in g with the settings of ep_lines.jl, for Redfield (four half-lines in
+# parallel: start Julia with --threads=4) and for Lindblad from the same pairs, then a dense check of the Redfield
+# points (gap of the pair). Left: the shift δω of the lines off δω = 0, against g. Lindblad: δω = +n g²/2 (the
+# Bloch–Siegert-like shift of ep_lines.jl); Redfield: δω = -n g²/2, the opposite shift (to be understood: the
+# non-secular terms of the x-coupled baths, against the p-like coupling -ig(a - a†)σx of the dipole gauge?). Right: the
+# deviation from g = δγ/(2√n), a few 1e-6 for both.
+bounds_s = (P3(-0.01, -0.048, 0.002), P3(0.01, 0.048, 0.03))
+track_lines(A, seeds) = [join_halves(hv...) for hv ∈ track_ep_lines(A, seeds; h=0.002, hmax=0.002, nsteps=80, bounds=bounds_s)]
+t_lind = @elapsed lines_lind = track_lines(A_lind, seeds_lind)
+t_red = @elapsed lines_red = track_lines(A_red, seeds_red)
+println("two lines: Lindblad ", round(t_lind, digits=1), " s, Redfield ", round(t_red, digits=1), " s (",
+        Threads.nthreads(), " threads)")
+for l ∈ lines_red
+    gaps = map(zip(l.points[1:4:end], l.λs[1:4:end])) do (prm_P, λ)
+        ev = eigvals(Matrix(A_red(prm_P)))
+        k = partialsortperm(abs.(ev .- λ), 1:2)
+        abs(ev[k[1]] - ev[k[2]])
+    end
+    n = manifold_of(l.points[findmin(p -> abs(p[3] - g0), l.points)[2]])
+    println("Redfield EP_$n: ", length(l.points), " points, g from ", round(minimum(p -> p[3], l.points), sigdigits=3),
+            " to ", round(maximum(p -> p[3], l.points), sigdigits=3), ", δω/g² from ",
+            round.(extrema(p -> p[1]/p[3]^2, l.points), digits=3), ", dense max gap ", round(maximum(gaps), sigdigits=2))
+end
+
+fig = Figure(size=(1000, 430))
+ax_δω = Axis(fig[1, 1]; xlabel="g", ylabel="δω", title="Shift of the EP lines off δω = 0")
+ax_dev = Axis(fig[1, 2]; xlabel="g", ylabel="g - δγ/(2√n)", title="Deviation from the JC line")
+for (name, ls, style) ∈ (("Lindblad", lines_lind, :dash), ("Redfield", lines_red, :solid)), l ∈ ls
+    n = manifold_of(l.points[findmin(p -> abs(p[3] - g0), l.points)[2]])
+    colour = clrs[:dark][(:byzantine, :minthe)[n]]
+    gs_l = getindex.(l.points, 3)
+    lines!(ax_δω, gs_l, getindex.(l.points, 1); color=colour, linestyle=style, label="$name, n = $n")
+    lines!(ax_dev, gs_l, [p[3] - p[2]/(2√n) for p ∈ l.points]; color=colour, linestyle=style)
+end
+gs_guide = range(0, 0.025, 100)
+for n ∈ 1:2, sgn ∈ (1, -1)
+    lines!(ax_δω, gs_guide, sgn*n .* gs_guide.^2 ./ 2; color=clrs[:dark][:subtext], linestyle=:dot, linewidth=1)
+end
+axislegend(ax_δω; position=:lb)
+save(joinpath(figdir, "redfield_ep_lines.png"), fig)
 fig

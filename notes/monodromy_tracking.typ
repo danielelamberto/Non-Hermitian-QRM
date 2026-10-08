@@ -96,7 +96,7 @@
   - The lines of the bisection and of the bracketing (`track_line`) are read between steps (at the corners of rectangles inside a line, and by the fit of $D$ below), so they keep an accurate dense output: Vern7 at $10^(-10)$, with GMRES.
 
   = Validation on the boson dimer
-  Dimer with `RWA_env`, $ω_0 = 1$, $γ_0 = 0.1$, $g = 0.01$, EPs at $(δ ω, δ γ) = (0, ± g\/2)$; $n_"Fock" = 5$ per mode, $N = 625$. Both modes are tracked and compared with $-i ω$ from `disc` along the whole loop:
+  Dimer with `RWA_env`, $ω_0 = 1$, $γ_0 = 0.1$, $g = 0.01$, EPs at $(δ ω, δ γ) = (0, ± g\/2)$; $n_"Fock" = 5$ per mode, $N = 625$. Both modes are tracked and compared with $-i ω$ from `disc` along the whole loop (with the former settings, Vern7 at $10^(-10)$; with the default, Tsit5 at $10^(-6)$, the same swaps, and deviations of $10^(-7)$ to $10^(-6)$ in the dense output between steps):
   #table(
     columns: 3,
     stroke: white,

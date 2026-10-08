@@ -213,15 +213,25 @@ bisection). If the fit is right, the rectangle shrinks from size w to ~ w²; if 
 outer cell is kept and the next fit is made there. Without a usable fit (P* outside, or δ too large), the rectangle is
 quadrisected. The new lines are tracked in parallel if `threaded`. A cut that fails (EP too close to it) is retried with
 δ enlarged by 1.7, up to twice. `corner_targets(x)` gives the starting targets at the outer corners; `kwargs` are passed
-to `track`. Returns (final rectangle, rectangles at every iteration, all tracked lines), as `ep_bisect`.
+to `track`. Returns (final rectangle, rectangles at every iteration, all tracked lines), as `ep_bisect`. Instead of a
+function, `corner_targets` can be the pair's eigenvalues at the lower-left corner only (as given by a scan cell): the
+pair is then carried to the other corners along the bottom and left sides.
 """
 function ep_bracket(A, rect, corner_targets; tol, maxiter=10, safety=2.0, threaded=true, kwargs...)
     track_all(specs) = threaded ? fetch.([Threads.@spawn(track_line(A, a, b, tg; kwargs...)) for (a, b, tg) ∈ specs]) :
                                   [track_line(A, a, b, tg; kwargs...) for (a, b, tg) ∈ specs]
     x0, x1, y0, y1 = rect
     c = (P2(x0, y0), P2(x1, y0), P2(x1, y1), P2(x0, y1))
-    lines = TrackedLine[track_all([(c[1], c[2], corner_targets(c[1])), (c[2], c[3], corner_targets(c[2])),
-                                   (c[4], c[3], corner_targets(c[4])), (c[1], c[4], corner_targets(c[1]))])...]
+    lines = if corner_targets isa Function
+        TrackedLine[track_all([(c[1], c[2], corner_targets(c[1])), (c[2], c[3], corner_targets(c[2])),
+                               (c[4], c[3], corner_targets(c[4])), (c[1], c[4], corner_targets(c[1]))])...]
+    else
+        # the pair given at the lower-left corner only: carried to the lower-right and upper-left corners along the
+        # bottom and left sides, from which the other two sides start
+        bottom, left = track_all([(c[1], c[2], corner_targets), (c[1], c[4], corner_targets)])
+        ends(l) = [branch(l, j, 1.0) for j ∈ 1:2]
+        TrackedLine[bottom, left, track_all([(c[2], c[3], ends(bottom)), (c[4], c[3], ends(left))])...]
+    end
     rect_swaps(lines, rect) ||
         error("the initial rectangle does not swap the pair: no (or an even number of) EP inside")
     # the two branches at the point a of a side, read on the tracked line through a and the side's other end b

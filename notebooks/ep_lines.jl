@@ -131,7 +131,7 @@ fig
 # Closed form (qrm.jl): manifold n of H_eff has an EP2 where δω = 0 and g√n = |δγ|/2, so the tower is a family of
 # straight lines g = |δγ|/(2√n) in the plane δω = 0, all through the origin. L conserves the excitation-number
 # difference k: sector k = 1 (⟨a⟩, ⟨σ-⟩), where EP_n appears in the elements (n, n-1) and (n+1, n), as 3 or 4 swapped
-# pairs at the same point. Seeds: a tracked scan of the slice g = g0, refined (as in qrm.jl), restricted to δγ > 0.
+# pairs at the same point. Seeds: a tracked scan of the slice g = g0, its EPs localised (`localise_eps`), δγ > 0.
 Nc_jc = 6                                                 # manifolds n ≤ 5 complete
 â_q, σ̂_q = qrm_operators(Nc_jc)
 idx_jc = excitation_sector(Nc_jc, 1)
@@ -146,19 +146,22 @@ println("JC, sector k = 1: dimension ", length(idx_jc))
 g0_q = 0.008
 slice_g0(A) = slice(A, P3(0, 0, g0_q), P3(1, 0, 0), P3(0, 1, 0))
 xs_q, ys_q = range(-0.0031, 0.0029, 7), range(0.0043, 0.0457, 25)       # generic grid: no node on δω = 0
-# seeds of the tower: the leaves of a refined tracked scan of the slice, from the eigenpairs `start` at its corner
-function tower_seeds(A, start; depth=6)
+# seeds of the tower: a tracked scan of the slice from the eigenpairs `start` at its corner, then `localise_eps`
+# (each swapping cell bracketed on its pair, down to 1e-5: the tracker's first correction finds the EP to round-off):
+# one seed per swapped pair, with its coalesced eigenvalue
+function tower_seeds(A, start)
     A_g0 = slice_g0(A)
     t = @elapsed cells = tracked_scan(A_g0, xs_q, ys_q, start)
-    t_r = @elapsed leaves = refine_tracked(A_g0, cells, depth)
+    t_l = @elapsed loc = localise_eps(A_g0, cells; tol=1e-5)
     println(length(start), " eigenvalues tracked; scan ", round(t, digits=1), " s, ", count(flagged, cells),
-            " flagged cells; refinement ", round(t_r, digits=1), " s, ", length(leaves), " leaves")
-    map(leaves) do c
-        seed = P3((c.rect[1] + c.rect[2])/2, (c.rect[3] + c.rect[4])/2, g0_q)
+            " flagged cells; localisation ", round(t_l, digits=1), " s: ", length(loc.eps), " EPs, ", length(loc.dps),
+            " DPs, ", length(loc.unresolved), " unresolved")
+    map(loc.eps) do e
+        seed = P3((e.rect[1] + e.rect[2])/2, (e.rect[3] + e.rect[4])/2, g0_q)
         n = (seed[2]/(2g0_q))^2                                            # manifold, from the JC formula
-        println("  leaf at (δω, δγ) = ", round.(seed[1:2], sigdigits=4), ", n ≈ ", round(n, digits=3), ", ",
-                length(c.swaps), " swaps")
-        (seed=seed, n=n, swaps=c.swaps)
+        println("  EP at (δω, δγ) = ", round.(seed[1:2], sigdigits=6), ", n ≈ ", round(n, digits=3), ", λ = ",
+                round(e.λ, digits=5))
+        (seed=seed, n=n, λ=e.λ)
     end
 end
 F_jc = eigen(Matrix(slice_g0(A_jc)(P2(xs_q[1], ys_q[1]))))
@@ -175,11 +178,12 @@ seeds_jc = tower_seeds(A_jc, collect(zip(F_jc.values, eachcol(F_jc.vectors))))
 bounds_q = (P3(-0.01, -0.048, 0.002), P3(0.01, 0.048, 0.03))
 # the tower lines through the seeds `ss` (one swapped pair each), with their manifold n
 function tower_lines(A, ss, labels)
-    ls = track_lines(A, [(s.seed, sum(s.swaps[1])/2) for s ∈ ss], labels; h=0.002, hmax=0.002, nsteps=80,
+    ls = track_lines(A, [(s.seed, s.λ) for s ∈ ss], labels; h=0.002, hmax=0.002, nsteps=80,
                      bounds=bounds_q)
     return [merge((n=round(Int, s.n),), l) for (s, l) ∈ zip(ss, ls)]
 end
-lines_jc = tower_lines(A_jc, seeds_jc, ["JC, n = $(round(Int, s.n))" for s ∈ seeds_jc])
+seeds_jc1 = unique(s -> round(Int, s.n), seeds_jc)        # JC: the 3–4 pairs of EP_n share its line, one each
+lines_jc = tower_lines(A_jc, seeds_jc1, ["JC, n = $(round(Int, s.n))" for s ∈ seeds_jc1])
 function jc_midpoint(prm_P, λ)
     sp = jc_spectrum(qrm_at(jc, prm_P), Nc_jc; k=1)
     return sum(sp[partialsortperm(abs.(sp .- λ), 1:2)])/2
@@ -213,10 +217,9 @@ F_r = eigen(Matrix(slice_g0(A_rabi)(P2(xs_q[1], ys_q[1]))))
 start_r = [(F_r.values[k], F_r.vectors[:, k]) for k ∈ findall(λ -> -1.5 < imag(λ) < -0.5, F_r.values)]
 seeds_rabi = tower_seeds(A_rabi, start_r)
 
-# one seed per swapped pair, each pair once (a pair swaps in a single leaf)
-pair_seeds = [(seed=s.seed, n=s.n, swaps=[sw]) for s ∈ seeds_rabi for sw ∈ s.swaps]
-lines_rabi = tower_lines(A_rabi, pair_seeds,
-                         ["QRM, n = $(round(Int, s.n)), λ_EP ≈ $(round(sum(s.swaps[1])/2, digits=4))" for s ∈ pair_seeds])
+# one seed per swapped pair (localise_eps brackets each pair of a swapping cell separately)
+lines_rabi = tower_lines(A_rabi, seeds_rabi,
+                         ["QRM, n = $(round(Int, s.n)), λ_EP ≈ $(round(s.λ, digits=4))" for s ∈ seeds_rabi])
 # independent check: dense eigenvalues of the sector at the tracked points, the pair nearest λ: its gap (~√|D| at the
 # point: ~1e-8 for D at round-off) and the distance of its midpoint to λ
 function dense_check(A, prm_P, λ)

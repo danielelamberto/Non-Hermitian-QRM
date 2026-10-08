@@ -170,8 +170,8 @@ end
     cell_winding(g::TrackedGrid, i, j, σ, a, k)
 
 Winding number of (λa - λk)² once around the cell (i, j), for two labels `a`, `k` of node (i, j) that return to
-themselves: the arg increments along the bottom and right edges, minus those along the top and left edges (traversed
-backwards).
+themselves or are swapped (D is symmetric in the pair, so its curve closes in both cases): the arg increments along the
+bottom and right edges, minus those along the top and left edges (traversed backwards).
 """
 function cell_winding(g::TrackedGrid, i, j, σ, a, k)
     right = g.to_right[i, j]                             # labels at the lower-right corner
@@ -188,9 +188,11 @@ Result of the scan for one grid cell.
 - `swaps`: the pairs (λa, λb) exchanged around the cell: an odd number of their EP2 inside.
 - `windings`: the pairs (λa, λb, w) returning to themselves with a nonzero winding w of (λa - λb)²: an even number of
   EP2, or a DP (w = ±2).
+- `swap_windings`: the winding of (λa - λb)² around the cell for each swap (odd: ±1 for a single EP2).
 - `cycles`: number of labels in cycles of length ≥ 3.
 - `lost`: number of labels lost around the cell.
 - `corner`: the labelled eigenpairs at the lower-left corner, to refine the cell without diagonalising.
+- `perm`: the permutation of the labels around the cell (`perm[a]`: the label a returns on), 0 for a lost label.
 Eigenvalues are given at the lower-left corner.
 """
 struct ScanCell
@@ -200,6 +202,8 @@ struct ScanCell
     cycles::Int
     lost::Int
     corner::Vector{NodeLabel}
+    swap_windings::Vector{Int}
+    perm::Vector{Int}
 end
 
 """
@@ -218,7 +222,10 @@ function scan_cell(g::TrackedGrid, i, j)
     σ, lost = cell_permutation(g, i, j)
     n = length(σ)
     λ = [p === nothing ? NaN + 0im : p[1] for p ∈ g.nodes[i, j]]
-    swaps = [(λ[a], λ[σ[a]]) for a ∈ 1:n if !lost[a] && σ[a] > a && σ[σ[a]] == a]
+    swapped = [a for a ∈ 1:n if !lost[a] && σ[a] > a && σ[σ[a]] == a]
+    swaps = [(λ[a], λ[σ[a]]) for a ∈ swapped]
+    # D is symmetric in the pair, so its winding is also defined for a swapped pair
+    swap_windings = [cell_winding(g, i, j, σ, a, σ[a]) for a ∈ swapped]
     returns(a) = !lost[a] && σ[a] == a
     windings = Tuple{ComplexF64,ComplexF64,Int}[]
     for a ∈ 1:n, k ∈ a+1:n
@@ -228,7 +235,8 @@ function scan_cell(g::TrackedGrid, i, j)
     end
     in_cycle(a) = !lost[a] && σ[a] != a && !lost[σ[a]] && σ[σ[a]] != a
     rect = (g.xs[i], g.xs[i + 1], g.ys[j], g.ys[j + 1])
-    return ScanCell(rect, swaps, windings, count(in_cycle, 1:n), count(lost), g.nodes[i, j])
+    return ScanCell(rect, swaps, windings, count(in_cycle, 1:n), count(lost), g.nodes[i, j], swap_windings,
+                    [lost[a] ? 0 : σ[a] for a ∈ 1:n])
 end
 
 """

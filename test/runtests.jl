@@ -174,6 +174,41 @@ end
         end
     end
 
+    @testset "localisation of the EPs of a scan (mock, JC)" begin
+        # coarse scan of the mock, then localise_eps: the four EP2 in boxes of 1e-9 (the close pair, in one coarse
+        # cell with a winding ±2, after refinement), the DP classified as such
+        F = eigen(Matrix(A_mock(P2(0, 0))))
+        start = [(F.values[k], F.vectors[:, k]) for k ∈ findall(λ -> imag(λ) > 1e-8, F.values)]
+        cells = tracked_scan(A_mock, range(0, 1, 13), range(0, 1, 13), start)
+        @test all(c -> isempty(c.swaps) || all(w -> abs(w) == 1, c.swap_windings), cells)
+        loc = localise_eps(A_mock, cells; tol=1e-9)
+        inside(r, p) = r[1] ≤ p.x ≤ r[2] && r[3] ≤ p.y ≤ r[4]
+        ep_pts = filter(p -> p.kind == :EP2, pts)
+        @test length(loc.eps) == length(ep_pts) && isempty(loc.unresolved) && isempty(loc.lost)
+        for p ∈ ep_pts
+            k = findfirst(e -> inside(e.rect, p), loc.eps)
+            @test k !== nothing && max(loc.eps[k].rect[2] - loc.eps[k].rect[1], loc.eps[k].rect[4] - loc.eps[k].rect[3]) ≤ 1e-9
+            @test k !== nothing && minimum(abs.([loc.eps[k].λ, conj(loc.eps[k].λ)] .- p.λ)) < 1e-10
+        end
+        dp = only(filter(p -> p.kind == :DP, pts))
+        @test length(loc.dps) == 1 && inside(only(loc.dps).rect, dp)
+        # JC tower (sector k = 1): every EP_n bracketed once per swapped pair (3 or 4), at the closed form
+        Nc = 5
+        â, σ̂ = qrm_operators(Nc)
+        jc = QRM(ωa=1.0, ωb=0.97, g=0.02, γa=0.1, γb=0.0, approx=[RWA_env, RWA_coupling])
+        idx = excitation_sector(Nc, 1)
+        A = AffineLiouvillian(P -> liouvillian(Lindbladian(â, σ̂, setproperties(jc, (g=P[1], ωb=P[2])))...).data[idx, idx], 2)
+        gs, ωbs = range(0.0101, 0.0303, 9), range(0.9713, 1.0291, 9)
+        F = eigen(Matrix(A(P2(gs[1], ωbs[1]))))
+        loc = localise_eps(A, tracked_scan(A, gs, ωbs, collect(zip(F.values, eachcol(F.vectors)))); tol=1e-8)
+        @test isempty(loc.dps) && isempty(loc.unresolved)
+        for n ∈ 1:Nc - 1
+            ωb, g, _ = jc_EP(jc, n)
+            @test count(e -> e.rect[1] ≤ g ≤ e.rect[2] && e.rect[3] ≤ ωb ≤ e.rect[4], loc.eps) == (n ∈ (1, Nc - 1) ? 3 : 4)
+        end
+        @test length(loc.eps) == 3 + 4 + 4 + 3
+    end
+
     @testset "bisection (mock)" begin
         ep = only(filter(p -> p.block == 2 && p.y < 0.7, pts))
         targets(prm_P) = first.(dimer_pairs(prm_P, 2))

@@ -108,9 +108,9 @@ eigenvalues:
 1. A transposition with winding ±1 (one EP2 of that pair): `ep_bracket` on that pair alone, from its eigenvalues at
    the cell's corner (`bracket_pair`); the brackets run as parallel tasks.
 2. An even winding ≠ 0 (a DP, or EP2s with a net index), a transposition with |w| ≥ 3, a cycle (EP2s sharing an
-   eigenvalue): the cell is refined with the whole window until clean; at the depth limit, a DP (windings ±2 only) or
-   unresolved.
-3. Lost labels: reported (refined only with `refine_lost`).
+   eigenvalue): the cell is refined with the whole window until clean; at the depth limit, its clean transpositions
+   are still bracketed, and the rest is a DP (windings ±2 only) or unresolved.
+3. Lost labels: reported, coarse cells and sub-cells alike (refined only with `refine_lost`).
 
 Output: a `Localisation` (`eps` as `LocalisedEP`s with a certified box and the coalesced eigenvalue, `dps`,
 `unresolved`, `lost`). Caveat: two EP2s of the same pair with opposite orientations give no swap and no winding, and

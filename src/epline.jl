@@ -56,16 +56,16 @@ reim_vec(D) = SVector(real(D), imag(D))
     disc_gradient(A, prm_P, σ; fd)
 
 The gradients of Re D and Im D at `prm_P` (central differences of step `fd` along each coordinate), as the columns of
-an N×2 matrix, and the midpoint of the pair at prm_P.
+an N×2 matrix, the midpoint of the pair at prm_P, and D there.
 """
 function disc_gradient(A, prm_P::SVector{N}, σ; fd) where N
-    _, λm = pair_disc(A, prm_P, σ)
+    D, λm = pair_disc(A, prm_P, σ)
     G = zeros(N, 2)
     for k ∈ 1:N
         e = SVector(ntuple(i -> i == k ? fd : 0.0, N))
         G[k, :] = (reim_vec(pair_disc(A, prm_P + e, λm)[1]) - reim_vec(pair_disc(A, prm_P - e, λm)[1]))/2fd
     end
-    return G, λm
+    return G, λm, D
 end
 
 """
@@ -92,8 +92,7 @@ Jacobian (columns ∇Re D, ∇Im D), gives the local model of the pair (`pair_mo
 function ep_newton(A, ξ0::P2, σ; fd, xtol, maxiter=10)
     ξ, λm, G = ξ0, σ, zeros(2, 2)
     for _ ∈ 1:maxiter
-        G, λm = disc_gradient(A, ξ, λm; fd)
-        D, λm = pair_disc(A, ξ, λm)
+        G, λm, D = disc_gradient(A, ξ, λm; fd)
         δξ = -(transpose(G) \ reim_vec(D))                   # the Jacobian's rows are ∇Re D, ∇Im D
         ξ += δξ
         norm(δξ) < xtol && return ξ, pair_disc(A, ξ, λm)[2], true, G
@@ -224,7 +223,7 @@ function bracket_in_plane(A_pl, σ, newton; w, greedy, depth, fd, xtol, kwargs..
     # first cuts (the midlines of the square for the bisection)
     a, b = 0.1373w, 0.0719w
     square = (a - w, a + w, b - w, b + w)
-    (x0, x1, y0, y1), _, _ = greedy ? ep_bracket(A_pl, square, targets; tol=1e-2w, kwargs...) :
+    (x0, x1, y0, y1), _, _ = greedy ? ep_bracket(A_pl, square, targets; box_tol=1e-2w, kwargs...) :
                                       ep_bisect(A_pl, square, targets; depth, kwargs...)
     ξ, λ, converged = ep_newton(A_pl, P2((x0 + x1)/2, (y0 + y1)/2), σ_EP; fd=min(fd, (x1 - x0)/10), xtol)
     converged || error("Newton on D did not converge from the bracketing rectangle")
@@ -245,6 +244,7 @@ corrector failed down to `hmin`: the line may end at a higher-order point, or le
 found), and `counts` of the corrections: `newton` and `bracket` (successful corrections, by the path of `ep_correct`,
 including the seed and steps then rejected for turning), `failed` (the corrector threw), `turned` (steps rejected:
 the tangent turned by more than θmax), and `carried` (check loops whose pair was carried from the previous one).
+`track_ep_lines` returns a half-line whose tracking threw as an empty `EPLine` with the status `:failed`.
 """
 struct EPLine
     points::Vector{P3}
@@ -355,7 +355,8 @@ one task per half-line, at most `ntasks` at a time (on as many Julia threads as 
 `--threads=ntasks` at least). The half-lines are independent, each with its own solvers; BLAS is set to one thread
 meanwhile (restored after), so that the sparse factorisations of the tasks do not oversubscribe the cores. `kwargs`
 are passed to `track_ep_line`. Returns, per seed, `(forward, backward)`: the `EPLine`s with direction +1 and -1
-(see `join_halves`).
+(see `join_halves`). A half-line whose tracking throws is reported by a warning and returned empty, with the status
+`:failed`: the others are kept.
 """
 function track_ep_lines(A, seeds; ntasks=4, kwargs...)
     jobs = [(k, direction) for k ∈ eachindex(seeds) for direction ∈ (1, -1)]
@@ -366,7 +367,13 @@ function track_ep_lines(A, seeds; ntasks=4, kwargs...)
         tasks = map(jobs) do (k, direction)
             Threads.@spawn Base.acquire(slots) do
                 prm_P0, σ0 = seeds[k]
-                track_ep_line(A, prm_P0, σ0; direction, kwargs...)
+                try
+                    track_ep_line(A, prm_P0, σ0; direction, kwargs...)
+                catch err
+                    err isa InterruptException && rethrow()
+                    @warn "half-line $direction of the seed $k failed: $(sprint(showerror, err))"
+                    failed_line()
+                end
             end
         end
         fetch.(tasks)
@@ -376,13 +383,19 @@ function track_ep_lines(A, seeds; ntasks=4, kwargs...)
     return [(forward=halves[2k - 1], backward=halves[2k]) for k ∈ eachindex(seeds)]
 end
 
+# a half-line of `track_ep_lines` whose tracking threw (e.g. a seed that is not a regular point of an EP line): empty,
+# so that the other half-lines are kept
+failed_line() = EPLine(P3[], ComplexF64[], P3[], :failed, (newton=0, bracket=0, failed=0, turned=0, carried=0))
+
 """
     join_halves(forward, backward)
 
 The two halves of an EP line (`EPLine`s from the same seed, directions +1 and -1) as one line, `(points, λs,
 tangents)`, running from the end of `backward` through the seed to the end of `forward`, the tangents along that
-direction.
+direction. A failed (empty) half leaves the other one alone.
 """
-join_halves(forward::EPLine, backward::EPLine) =
-    (points=[reverse(backward.points); forward.points[2:end]], λs=[reverse(backward.λs); forward.λs[2:end]],
-     tangents=[-reverse(backward.tangents); forward.tangents[2:end]])
+function join_halves(forward::EPLine, backward::EPLine)
+    k = isempty(backward.points) ? 1 : 2                # the seed is shared by both halves: kept once
+    return (points=[reverse(backward.points); forward.points[k:end]], λs=[reverse(backward.λs); forward.λs[k:end]],
+            tangents=[-reverse(backward.tangents); forward.tangents[k:end]])
+end

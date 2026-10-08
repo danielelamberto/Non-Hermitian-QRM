@@ -6,8 +6,9 @@
 #   - a pair returning to itself with an even winding w ≠ 0 (a DP, or EP2s with a net index), a transposition with
 #     |w| ≥ 3 (several EP2s), a cycle of three labels or more (EP2s sharing an eigenvalue) → the cell is refined (2 × 2
 #     sub-cells, the whole window, from the eigenpairs at its corner), and its sub-cells handled the same way; at the
-#     depth limit, a cell left with only ±2 windings is classified as a DP, any other as unresolved;
-#   - lost labels say nothing about their orbit: the cell is reported, and refined only on request.
+#     depth limit, its clean transpositions are still bracketed, and the cell is classified as a DP if what remains
+#     is only ±2 windings, as unresolved otherwise;
+#   - lost labels say nothing about their orbit: the cell is reported (at any level), and refined only on request.
 # A cell that needs refinement is refined as a whole, its clean transpositions bracketed in the sub-cells (no EP is
 # bracketed twice). Refinement should be rare in physical models: the common case goes from the coarse scan straight
 # to the bracketing, which converges quadratically (`ep_bracket`).
@@ -34,8 +35,8 @@ end
 
 The result of `localise_eps`: the localised EP2s `eps`, the cells classified as `dps` (a winding ±2 persisting down to
 the depth limit: a DP, or two EP2s of the same orientation closer than the finest cell), the `unresolved` cells (cycles
-or windings |w| ≥ 3 at the depth limit, or whose bracketing failed), the cells with `lost` labels, and the sub-cells
-scanned by the refinements (`refined`, for plots).
+or windings |w| ≥ 3 at the depth limit, or whose bracketing failed), the cells with `lost` labels (coarse cells and
+sub-cells of the refinements), and the sub-cells scanned by the refinements (`refined`, for plots).
 """
 struct Localisation
     eps::Vector{LocalisedEP}
@@ -45,36 +46,41 @@ struct Localisation
     refined::Vector{ScanCell}
 end
 
-# what a cell needs: :empty, :bracket (only clean transpositions, |w| = 1), or :refine (an even winding, a
-# transposition with |w| ≥ 3, or a cycle)
-function cell_action(c::ScanCell)
-    flagged(c) || return :empty
-    (c.cycles > 0 || !isempty(c.windings) || any(w -> abs(w) != 1, c.swap_windings)) && return :refine
-    return :bracket
-end
+# whether a cell shows more than clean transpositions (|w| = 1): an even winding, a transposition with |w| ≥ 3, or a
+# cycle
+needs_refinement(c::ScanCell) = c.cycles > 0 || !isempty(c.windings) || any(w -> abs(w) != 1, c.swap_windings)
 
-# a cell at the depth limit that still needs refinement: a DP if all it has are windings ±2
-is_dp_like(c::ScanCell) = c.cycles == 0 && isempty(c.swaps) && all(w -> abs(w[3]) == 2, c.windings)
+# what a cell needs: :empty, :bracket (only clean transpositions), or :refine
+cell_action(c::ScanCell) = !flagged(c) ? :empty : needs_refinement(c) ? :refine : :bracket
+
+# the clean transpositions of a cell: the pairs swapped with a winding ±1 (one EP2 each)
+clean_swaps(c::ScanCell) = [pair for (pair, w) ∈ zip(c.swaps, c.swap_windings) if abs(w) == 1]
+
+# a cell at the depth limit that still needs refinement: a DP if, besides its clean transpositions (bracketed), all it
+# has are windings ±2
+is_dp_like(c::ScanCell) =
+    c.cycles == 0 && all(w -> abs(w) == 1, c.swap_windings) && !isempty(c.windings) &&
+    all(w -> abs(w[3]) == 2, c.windings)
 
 """
-    localise_eps(A, cells; max_depth=8, tol=1e-9, refine_lost=false, ntasks=4, kwargs...)
+    localise_eps(A, cells; max_depth=8, box_tol=1e-9, refine_lost=false, ntasks=4, kwargs...)
 
 Localises the EP2s in the `cells` of a tracked scan of the family `A` (`tracked_scan`): each cell is handled by orbits
 of its permutation (see the head of localise.jl). Clean transpositions (winding ±1) are bracketed on their pair alone
-(`ep_bracket` down to a rectangle of size `tol`, from the pair's eigenvalues at the cell's corner); cells with even
-windings, |w| ≥ 3 or cycles are refined (2 × 2 sub-cells, the whole window), at most `max_depth` levels. Cells with
-lost labels are reported in `lost`, and refined like the others if `refine_lost`. The brackets are independent and run
-as parallel tasks, at most `ntasks` at a time. `kwargs` are passed to `track` (scan and bracketing). Returns a
-`Localisation`.
+(`ep_bracket` down to a rectangle of size `box_tol`, from the pair's eigenvalues at the cell's corner); cells with even
+windings, |w| ≥ 3 or cycles are refined (2 × 2 sub-cells, the whole window), at most `max_depth` levels (at the limit,
+their clean transpositions are still bracketed). Cells with lost labels, coarse or from a refinement, are reported in
+`lost`, and refined like the others if `refine_lost`. The brackets are independent and run as parallel tasks, at most
+`ntasks` at a time. `kwargs` are passed to `track` (scan and bracketing). Returns a `Localisation`.
 """
-function localise_eps(A, cells; max_depth=8, tol=1e-9, refine_lost=false, ntasks=4, kwargs...)
+function localise_eps(A, cells; max_depth=8, box_tol=1e-9, refine_lost=false, ntasks=4, kwargs...)
     eps, dps, unresolved, lost, refined = LocalisedEP[], ScanCell[], ScanCell[], ScanCell[], ScanCell[]
     todo = [(c, 0) for c ∈ cells if flagged(c) || c.lost > 0]
     while !isempty(todo)
         next = Tuple{ScanCell,Int}[]
         jobs = Tuple{ScanCell,NTuple{2,ComplexF64}}[]           # the pairs to bracket at this level
         for (c, depth) ∈ todo
-            c.lost > 0 && depth == 0 && push!(lost, c)
+            c.lost > 0 && push!(lost, c)
             action = c.lost > 0 && refine_lost ? :refine : cell_action(c)
             if action == :bracket
                 append!(jobs, [(c, pair) for pair ∈ c.swaps])
@@ -83,9 +89,11 @@ function localise_eps(A, cells; max_depth=8, tol=1e-9, refine_lost=false, ntasks
                     x0, x1, y0, y1 = c.rect
                     sub = tracked_scan(A, range(x0, x1, 3), range(y0, y1, 3), c.corner; kwargs...)
                     append!(refined, sub)
-                    append!(next, [(s, depth + 1) for s ∈ sub if flagged(s) || (refine_lost && s.lost > 0)])
+                    append!(next, [(s, depth + 1) for s ∈ sub if flagged(s) || s.lost > 0])
                 else
-                    push!(is_dp_like(c) ? dps : unresolved, c)
+                    # the depth limit: the clean transpositions (independent orbits) are still bracketed
+                    append!(jobs, [(c, pair) for pair ∈ clean_swaps(c)])
+                    needs_refinement(c) && push!(is_dp_like(c) ? dps : unresolved, c)
                 end
             end
         end
@@ -95,7 +103,7 @@ function localise_eps(A, cells; max_depth=8, tol=1e-9, refine_lost=false, ntasks
         blas_threads = BLAS.get_num_threads()
         BLAS.set_num_threads(1)
         results = try
-            fetch.([Threads.@spawn(Base.acquire(() -> bracket_pair(A, c, pair; tol, kwargs...), slots))
+            fetch.([Threads.@spawn(Base.acquire(() -> bracket_pair(A, c, pair; box_tol, kwargs...), slots))
                     for (c, pair) ∈ jobs])
         finally
             BLAS.set_num_threads(blas_threads)
@@ -109,9 +117,9 @@ function localise_eps(A, cells; max_depth=8, tol=1e-9, refine_lost=false, ntasks
 end
 
 # `ep_bracket` on one swapped pair of a scan cell, from its eigenvalues at the cell's corner; nothing if it fails
-function bracket_pair(A, c::ScanCell, (λa, λb); tol, kwargs...)
+function bracket_pair(A, c::ScanCell, (λa, λb); box_tol, kwargs...)
     rect, history, lines = try
-        ep_bracket(A, c.rect, [λa, λb]; tol, kwargs...)
+        ep_bracket(A, c.rect, [λa, λb]; box_tol, kwargs...)
     catch err
         err isa InterruptException && rethrow()
         @warn "bracketing the pair ($λa, $λb) of the cell $(c.rect) failed: $(sprint(showerror, err))"

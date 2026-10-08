@@ -52,7 +52,7 @@ A_g0 = slice(A3, P3(0, 0, g0), P3(1, 0, 0), P3(0, 1, 0))
 targets_g0(st) = modes_λ(P3(st[1], st[2], g0))
 seeds = map([1, -1]) do σ                                   # upper (δγ = g0/2) and lower (δγ = -g0/2) EP
     rect0 = (-0.011, 0.009, σ*g0/2 - 0.0081, σ*g0/2 + 0.0113)
-    local t = @elapsed rect, hist, lines = ep_bracket(A_g0, rect0, targets_g0; tol=1e-9)
+    local t = @elapsed rect, hist, lines = ep_bracket(A_g0, rect0, targets_g0; box_tol=1e-9)
     seed = P3((rect[1] + rect[2])/2, (rect[3] + rect[4])/2, g0)
     println("EP δγ = $(σ*g0/2): box of size $(round(max(rect[2] - rect[1], rect[4] - rect[3]), sigdigits=2)) at ",
             round.(seed[1:2], sigdigits=8), " after $(length(hist) - 1) iterations, $(length(lines)) tracked lines, ",
@@ -152,7 +152,7 @@ xs_q, ys_q = range(-0.0031, 0.0029, 7), range(0.0043, 0.0457, 25)       # generi
 function tower_seeds(A, start)
     A_g0 = slice_g0(A)
     t = @elapsed cells = tracked_scan(A_g0, xs_q, ys_q, start)
-    t_l = @elapsed loc = localise_eps(A_g0, cells; tol=1e-5)
+    t_l = @elapsed loc = localise_eps(A_g0, cells; box_tol=1e-5)
     println(length(start), " eigenvalues tracked; scan ", round(t, digits=1), " s, ", count(flagged, cells),
             " flagged cells; localisation ", round(t_l, digits=1), " s: ", length(loc.eps), " EPs, ", length(loc.dps),
             " DPs, ", length(loc.unresolved), " unresolved")

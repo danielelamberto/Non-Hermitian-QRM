@@ -181,7 +181,7 @@ end
         start = [(F.values[k], F.vectors[:, k]) for k ∈ findall(λ -> imag(λ) > 1e-8, F.values)]
         cells = tracked_scan(A_mock, range(0, 1, 13), range(0, 1, 13), start)
         @test all(c -> isempty(c.swaps) || all(w -> abs(w) == 1, c.swap_windings), cells)
-        loc = localise_eps(A_mock, cells; tol=1e-9)
+        loc = localise_eps(A_mock, cells; box_tol=1e-9)
         inside(r, p) = r[1] ≤ p.x ≤ r[2] && r[3] ≤ p.y ≤ r[4]
         ep_pts = filter(p -> p.kind == :EP2, pts)
         @test length(loc.eps) == length(ep_pts) && isempty(loc.unresolved) && isempty(loc.lost)
@@ -192,6 +192,14 @@ end
         end
         dp = only(filter(p -> p.kind == :DP, pts))
         @test length(loc.dps) == 1 && inside(only(loc.dps).rect, dp)
+        # at the depth limit, the clean transpositions of a cell that needs refinement are still bracketed, the rest
+        # classified (a ±2 winding added by hand: a DP); a cell with lost labels only is reported as lost, not as a DP
+        c_ep = cells[findfirst(c -> !isempty(c.swaps) && isempty(c.windings) && c.cycles == 0 && c.lost == 0, cells)]
+        loc0 = localise_eps(A_mock, [setproperties(c_ep, windings=[(0.0im, 1.0im, 2)])]; max_depth=0, box_tol=1e-6)
+        @test length(loc0.eps) == length(c_ep.swaps) && length(loc0.dps) == 1 && isempty(loc0.unresolved)
+        c_lost = setproperties(c_ep, (swaps=NTuple{2,ComplexF64}[], swap_windings=Int[], lost=2))
+        loc0 = localise_eps(A_mock, [c_lost]; max_depth=0, refine_lost=true)
+        @test isempty(loc0.eps) && isempty(loc0.dps) && isempty(loc0.unresolved) && length(loc0.lost) == 1
         # JC tower (sector k = 1): every EP_n bracketed once per swapped pair (3 or 4), at the closed form
         Nc = 5
         â, σ̂ = qrm_operators(Nc)
@@ -200,7 +208,7 @@ end
         A = AffineLiouvillian(P -> liouvillian(Lindbladian(â, σ̂, setproperties(jc, (g=P[1], ωb=P[2])))...).data[idx, idx], 2)
         gs, ωbs = range(0.0101, 0.0303, 9), range(0.9713, 1.0291, 9)
         F = eigen(Matrix(A(P2(gs[1], ωbs[1]))))
-        loc = localise_eps(A, tracked_scan(A, gs, ωbs, collect(zip(F.values, eachcol(F.vectors)))); tol=1e-8)
+        loc = localise_eps(A, tracked_scan(A, gs, ωbs, collect(zip(F.values, eachcol(F.vectors)))); box_tol=1e-8)
         @test isempty(loc.dps) && isempty(loc.unresolved)
         for n ∈ 1:Nc - 1
             ωb, g, _ = jc_EP(jc, n)
@@ -217,9 +225,15 @@ end
         @test max(rect[2] - rect[1], rect[4] - rect[3]) < 0.01
         # greedy bracketing (regula falsi on D, 3 × 3 cuts): a certified box of 1e-9 in a few iterations, and the fit of
         # D on the sides of a small box around the EP points at it
-        rect, hist, _ = ep_bracket(A_mock, (ep.x - 0.05, ep.x + 0.04, ep.y - 0.06, ep.y + 0.05), targets; tol=1e-9)
+        rect, hist, _ = ep_bracket(A_mock, (ep.x - 0.05, ep.x + 0.04, ep.y - 0.06, ep.y + 0.05), targets; box_tol=1e-9)
         @test rect[1] ≤ ep.x ≤ rect[2] && rect[3] ≤ ep.y ≤ rect[4]
         @test max(rect[2] - rect[1], rect[4] - rect[3]) ≤ 1e-9 && length(hist) ≤ 9
+        # an EP at 1% of the width from a side: the cuts that fall within the margin are moved to it, the box still
+        # shrinks to 1e-9; without a usable fit, a retry moves the cut
+        rect, _, _ = ep_bracket(A_mock, (ep.x - 0.001, ep.x + 0.099, ep.y - 0.06, ep.y + 0.05), targets; box_tol=1e-9)
+        @test rect[1] ≤ ep.x ≤ rect[2] && rect[3] ≤ ep.y ≤ rect[4] && max(rect[2] - rect[1], rect[4] - rect[3]) ≤ 1e-9
+        @test NonHermitianQRM.bracket_cuts(0.0, 1.0, 0.01, 1e-3) == [0.02]
+        @test allunique([only(NonHermitianQRM.bracket_cuts(0.0, 1.0, 2.0, 1e-3; attempt)) for attempt ∈ 0:2])
         small = (ep.x - 1e-3, ep.x + 1.2e-3, ep.y - 0.9e-3, ep.y + 1.1e-3)
         c = (P2(small[1], small[3]), P2(small[2], small[3]), P2(small[2], small[4]), P2(small[1], small[4]))
         lines = [track_line(A_mock, c[1], c[2], targets(c[1])), track_line(A_mock, c[2], c[3], targets(c[2])),
@@ -282,6 +296,11 @@ end
         @test length(joined.points) == length(par[1].forward.points) + length(par[1].backward.points) - 1
         @test norm(joined.points[length(par[1].backward.points)] - par[1].forward.points[1]) < 1e-12   # the seed
         @test all(k -> joined.tangents[k] ⋅ (joined.points[k + 1] - joined.points[k]) > 0, 1:length(joined.points) - 1)
+        # a seed off any EP line (NaN): its half-lines fail and come back empty, the other seed's are kept
+        par_bad = track_ep_lines(A, [seeds[1], (P3(NaN, 0, 0), λ_EP(P0))]; h=0.02, nsteps=5)
+        @test par_bad[2].forward.status == par_bad[2].backward.status == :failed
+        @test maximum(norm.(par_bad[1].forward.points .- par[1].forward.points)) < 1e-12
+        @test join_halves(par[1].forward, par_bad[2].backward).points == par[1].forward.points
         # the pair of each check loop is carried from the previous one; without carrying, the same line
         line_c = track_ep_line(A, P0, λ_EP(P0); h=0.02, nsteps=6)
         line_s = track_ep_line(A, P0, λ_EP(P0); h=0.02, nsteps=6, continue_pair=false)

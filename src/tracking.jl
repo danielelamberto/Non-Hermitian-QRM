@@ -337,7 +337,9 @@ breakpoints as tstops.
 Returns `(sol, diagnostics)`: λ(u) = sol(u)[end], r(u) = sol(u)[1:end-1].
 - `alg`, `reltol`, `abstol`: the ODE solver. The corrector puts every step back on an exact eigenpair, so the
   integrator only has to stay in Newton's basin and on the right branch: Tsit5 at 1e-6 (2.5–4× faster than Vern7 at
-  1e-10, the former default, on loops, lines and scans; scans became wrong at 1e-4). The values at the steps
+  1e-10, the former default, on loops, lines and scans; scans became wrong at 1e-4). Where the tracked eigenvalue
+  comes very close to another one (e.g. its conjugate near a real-axis EP line), the steps may let it jump: scans then
+  report lost labels; `alg=Vern7(lazy=false), reltol=1e-10, abstol=1e-12` avoids it on the mock's random instances. The values at the steps
   (sol.t, sol.u) are exact eigenpairs (to `tol`: the corrector overwrites the saved step); the dense output sol(u)
   between them is accurate to ~reltol, and less near an EP. For an accurate dense output,
   `alg=Vern7(lazy=false), reltol=1e-10, abstol=1e-12`.

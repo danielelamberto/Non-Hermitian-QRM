@@ -257,6 +257,9 @@ fig
 # bands separated (no unplanted crossing between blocks), the driven qubit's Ω > 0 (a single EP line), distinct
 # constant real parts. Each instance: one diagonalisation at (0, 0), tracking scan on 39 × 39, 7 refinement levels,
 # compared with the planted points inside the square. Figures in figures/ (figdir).
+# With the default integrator settings of `track` (Tsit5, 1e-6), seeds 2 and 7 (windows of 8, with an eigenvalue whose
+# conjugate comes close near the real-axis EP line) lose labels in 274 and 103 cells; all planted points are still
+# found. Passing `alg=Vern7(lazy=false), reltol=1e-10, abstol=1e-12` to the scans removes them (2026-10-08).
 function random_mock_blocks(rng)
     u(a, b) = a + (b - a)*rand(rng)
     ωs = shuffle(rng, [0.8, 1.25, 1.7])                  # bands ω0 ± 0.16 never overlap

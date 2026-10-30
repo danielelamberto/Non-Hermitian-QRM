@@ -12,7 +12,7 @@ using Revise
 using NonHermitianQRM
 using NonHermitianQRM: ohmic
 using NonHermitianQRM: Circle          # also exported by Makie: ours is the loop in parameter space
-using QuantumToolbox, CairoMakie, MakieStyles, LinearAlgebra, SparseArrays, Accessors
+using QuantumToolbox, CairoMakie, MakieStyles, LinearAlgebra, SparseArrays, Accessors, JLD2
 figdir = joinpath(pkgdir(NonHermitianQRM), "figures")
 mkpath(figdir)
 
@@ -285,4 +285,99 @@ for n ∈ 1:2, sgn ∈ (1, -1)
 end
 axislegend(ax_δω; position=:lb)
 save(joinpath(figdir, "redfield_ep_lines.png"), fig)
+fig
+
+
+#%% Scan of the plane (γa, g) at ωa = ωb = 1, γb = 0.05, against the coworker's EPs
+
+# A tracked scan of the Redfield QRM (odd sector, T = 0.02) over γa ∈ [0.005, 0.04], g ∈ [0.1, 0.5], from the eigenvalues
+# near Im λ = -ω at the corner (0.005, 0.1), then localise_eps: no line tracking. Compared with the coworker's EP
+# table (data/, Redfield at T = 0, Ĥ diagonalised at Nc = 60 and L built on its N_trunc = 30 lowest dressed levels;
+# their λ is the conjugate of ours; their "reliable" cut is exactly maxlevel ≤ 15, maxlevel being the highest dressed
+# level in the EP's eigenvector).
+# - Truncation: Nc = 12 (first run, 2026-10-30) is not enough for g ≲ 0.37. Re-localised at Nc = 16 and 20, its EPs
+#   there moved by up to ~5e-3, some were missed, and two pairs were artefacts (g ≈ 0.113; γa ≈ 0.026, λ ≈ -0.31 - 1.2i,
+#   30% of its weight on the top Fock levels). For g ≥ 0.37, Nc = 16 and 20 agree to ~1e-8, and the γa ≈ 0.0198
+#   pairs match the coworker's to 1e-7–2e-6 (T = 0.02 vs 0 makes no visible difference). Hence Nc = 16 here: ~3× the
+#   cost of Nc = 12 (whose scan took ~35 min with 12 threads, plus ~15 min of localisation). Pairs involving dressed
+#   levels ≳ 20 (the coworker's maxlevel) still move at Nc = 16 → 20 by ~1e-5.
+# - The EPs come in split pairs (two EP2s of one pair, 1e-6–1e-4 apart): a coarse cell sees a winding +2, and
+#   localise_eps refines it until each EP2 has its own swapping sub-cell.
+# - Lost labels (outlined cells, g ≳ 0.22): the window, not the truncation. A few labels at its edges sweep far in
+#   Im λ with g, pass EPs with eigenvalues outside the tracked set, and come back on none of the labels. EPs among the
+#   other labels are fully covered. Also left out by the window: the towers |Im λ| ≈ 3…13 and the |Im λ| ≈ 1 branch
+#   with Re λ < -0.15, both in the coworker's table.
+Nc = 16
+â, σ̂ = qrm_operators(Nc)
+odd = odd_sector(Nc)
+base_sc = QRM(ωa=1.0, ωb=1.0, γb=0.05, Ta=0.02, Tb=0.02)
+qrm_sc(prm_P) = setproperties(base_sc, (γa=prm_P[1], g=prm_P[2]))
+R_sc = RedfieldMap(first.(redfield_baths(â, σ̂, base_sc)); idx=odd)
+A_sc = FDLiouvillian(prm_P -> R_sc(Hamiltonian(â, σ̂, qrm_sc(prm_P)), redfield_baths(â, σ̂, qrm_sc(prm_P))),
+                     P2(0.012, 0.3); check_at=P2(0.006, 0.45))
+xs_sc, ys_sc = range(0.005, 0.04, 36), range(0.1, 0.5, 41)
+F = eigen(Matrix(A_sc(P2(xs_sc[1], ys_sc[1]))))
+start_sc = [(F.values[k], F.vectors[:, k]) for k ∈ findall(λ -> -1.5 < imag(λ) < -0.5 && real(λ) > -0.15, F.values)]
+t = @elapsed cells_sc = tracked_scan(A_sc, xs_sc, ys_sc, start_sc)
+t_l = @elapsed loc_sc = localise_eps(A_sc, cells_sc; box_tol=1e-5)
+println(length(start_sc), " eigenvalues tracked; scan ", round(t, digits=1), " s, ", count(flagged, cells_sc),
+        " flagged cells, ", count(c -> c.lost > 0, cells_sc), " with lost labels; localisation ", round(t_l, digits=1),
+        " s: ", length(loc_sc.eps), " EPs, ", length(loc_sc.dps), " DPs, ", length(loc_sc.unresolved), " unresolved")
+centre(r) = Point2f((r[1] + r[2])/2, (r[3] + r[4])/2)
+
+# our EPs as a table in the style of the coworker's (same names where the meaning is the same; λ in our sign
+# convention, the conjugate of theirs), with a light summary of the cells to redraw the scan without rerunning it
+point_of(prm_P) = merge((g=prm_P[2], γa=prm_P[1], Nc=Nc), (; (k => getfield(base_sc, k) for k ∈ (:ωa, :ωb, :γb, :ε, :Ta, :Tb))...),
+                        (liouvillian=:redfield, rwa=false))
+R_ours = [(point=point_of(((e.rect[1] + e.rect[2])/2, (e.rect[3] + e.rect[4])/2)), verdict="EP2", λ=e.λ, rect=e.rect, pair=e.pair, cell=e.cell) for e ∈ loc_sc.eps]
+jldsave(joinpath(pkgdir(NonHermitianQRM), "data", "redfield_scan_gammaa_g_Nc$Nc.jld2");
+        R=R_ours, cells=[(rect=c.rect, flagged=flagged(c), lost=c.lost) for c ∈ cells_sc],
+        dps=[c.rect for c ∈ loc_sc.dps], unresolved=[c.rect for c ∈ loc_sc.unresolved], xs=collect(xs_sc), ys=collect(ys_sc))
+
+theirs = filter(r -> xs_sc[1] ≤ r.point.γa ≤ xs_sc[end] && ys_sc[1] ≤ r.point.g ≤ ys_sc[end],
+                load(joinpath(pkgdir(NonHermitianQRM), "data", "ep_prod_complex_eps.jld2"), "R"))
+maxlevel_cut = 25
+
+C = clrs[:dark]
+rect_pts(r) = Point2f[(r[1], r[3]), (r[2], r[3]), (r[2], r[4]), (r[1], r[4]), (r[1], r[3])]
+λs = [e.λ for e ∈ loc_sc.eps]
+fig = Figure(size=(1500, 700))
+Label(fig[0, 1:4], "Redfield QRM, ωa = ωb = 1, γb = 0.05, T = 0.02, Nc = $Nc: tracked scan and localised EPs; " *
+                   "circles: coworker's EPs (T = 0, Nc = 60, N_trunc = 30; filled: maxlevel ≤ $maxlevel_cut)")
+ax = Axis(fig[1, 1]; xlabel="γa", ylabel="g", title="scan (shaded: flagged, outlined: lost labels)")
+for c ∈ cells_sc
+    if flagged(c)
+        poly!(ax, rect_pts(c.rect); color=(C[:overlay], 0.4), strokecolor=C[:subtext], strokewidth=0.8)
+    else
+        lines!(ax, rect_pts(c.rect); color=C[:surface], linewidth=0.5)
+    end
+    c.lost > 0 && lines!(ax, rect_pts(c.rect); color=(C[:helios], 0.6), linewidth=1, label="lost labels")
+end
+for (cs, mk, col, name) ∈ ((loc_sc.dps, :diamond, C[:minthe], "DP (winding ±2)"),
+                           (loc_sc.unresolved, :xcross, C[:selene], "unresolved"))
+    isempty(cs) || scatter!(ax, [centre(c.rect) for c ∈ cs]; marker=mk, color=col, markersize=12, label=name)
+end
+sc = scatter!(ax, [centre(e.rect) for e ∈ loc_sc.eps]; color=imag.(λs), colormap=C[:byz], marker=:star5,
+              markersize=13, label="EP2 (ours)")
+Colorbar(fig[1, 2], sc; label="Im λ_EP (ours)")
+# coworker's EPs: colour = branch (|Im λ| ≈ 1 as ours, or the towers outside our window), filled = maxlevel ≤ cut
+for kept ∈ (true, false), near ∈ (true, false)
+    rs = filter(r -> (r.maxlevel ≤ maxlevel_cut) == kept && (abs(imag(r.λ)) < 1.5) == near, theirs)
+    isempty(rs) && continue
+    col = near ? C[:hesperides] : C[:selene]
+    scatter!(ax, [Point2f(r.point.γa, r.point.g) for r ∈ rs]; color=kept ? (col, 0.5) : :transparent, strokecolor=col,
+             strokewidth=1.2, markersize=11,
+             label="coworker, |Im λ| ≈ $(near ? "1" : "3…13"), maxlevel $(kept ? "≤" : ">") $maxlevel_cut")
+end
+axislegend(ax; position=:rb, unique=true, merge=true)
+limits!(ax, xs_sc[1], xs_sc[end], ys_sc[1], ys_sc[end])
+ax_λ = Axis(fig[1, 3]; xlabel="Re λ", ylabel="Im λ", title="coalesced eigenvalues (coworker's: conj λ, |Im λ| < 1.5)")
+scatter!(ax_λ, real.(λs), imag.(λs); color=[centre(e.rect)[2] for e ∈ loc_sc.eps], colormap=C[:byz], marker=:star5,
+         markersize=13, colorrange=extrema(ys_sc))
+near1 = filter(r -> abs(imag(r.λ)) < 1.5, theirs)
+scatter!(ax_λ, real.(conj.([r.λ for r ∈ near1])), imag.(conj.([r.λ for r ∈ near1]));
+         color=[r.maxlevel ≤ maxlevel_cut ? (C[:hesperides], 0.5) : (C[:hesperides], 0.0) for r ∈ near1],
+         strokecolor=C[:hesperides], strokewidth=1.2, markersize=11)
+Colorbar(fig[1, 4], limits=extrema(ys_sc), colormap=C[:byz], label="g")
+save(joinpath(figdir, "redfield_scan_gammaa_g.png"), fig)
 fig

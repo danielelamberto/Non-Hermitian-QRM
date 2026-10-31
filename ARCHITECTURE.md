@@ -19,7 +19,7 @@ and vanishing linearly there, complements this: its winding around a loop counts
 ```
 models.jl, master_equations.jl, mock.jl, qrm.jl     physics: models, Liouvillians, test beds
         │
-paths.jl, affine.jl                                 parameter space: paths, affine families L(P)
+paths.jl, affine.jl, finite_differences.jl         parameter space: paths, families L(P)
         │
 tracking.jl                                         follow one eigenpair along a path
         │
@@ -35,7 +35,11 @@ tracking.jl                                         follow one eigenpair along a
 
 - `models.jl`: the models (`Boson`, `BosonDimer`, `Duffing`, `Optomech`) with their approximations (`RWA_env`,
   `RWA_coupling`, …), and their analytic response: `D_R`, the characteristic polynomial `disc`, analytic `EP`s.
-- `master_equations.jl`: `Lindbladian`, `Redfield`, `DressedLiouvillian`, modes and symmetry sectors.
+- `master_equations.jl`: `Lindbladian`, `Redfield`, `DressedLiouvillian`, modes and symmetry sectors. Redfield is
+  assembled here (`redfield_liouvillian`, in the Fock basis, on a pattern fixed by the coupling operators), checked
+  against QuantumToolbox's `bloch_redfield_tensor`. Along a family, `RedfieldMap` does the assembly as one sparse
+  product: L is linear in H and in the filtered operators Λ (and their conjugates), so its stored values in a sector
+  are M x, with M built once from the assembly on unit inputs.
 - `mock.jl`: `MockLiouvillian`, a direct sum of small blocks with exactly known spectrum and planted singularities
   (EP2s, a DP, a real-axis EP line, a DP line): the test bed of every algorithm below.
 - `qrm.jl`: the quantum Rabi model (`QRM`), its Jaynes–Cummings limit and closed forms (`jc_spectrum`, `jc_EP`),
@@ -47,6 +51,10 @@ tracking.jl                                         follow one eigenpair along a
    `AffineLiouvillian` stores L(P) = L₀ + Σₖ Pₖ Lₖ (built by finite differences of the model, checked to be affine),
    all terms on one sparsity pattern, so that `evaluate!` and `derivative!` write L(P) and its derivative along a
    direction in place. In practice L is first restricted to a symmetry sector (`excitation_sector`, parity).
+   A Liouvillian smooth but not affine in P (Redfield: built in the eigenbasis of H(P)) is an `FDLiouvillian`
+   (`finite_differences.jl`): L(P) rebuilt by its builder at every evaluation, its derivative by a central
+   difference (two builds), on the fixed pattern of the builder's matrices. For Redfield, the builder is a
+   `RedfieldMap` (about 20× faster than a full assembly).
 2. `slice(A, P₀, e1, e2)` restricts a family to a plane; `Reparametrised` changes coordinates (log rates, polar
    coordinates, …); both keep the same interface, so every algorithm below runs on them unchanged.
 3. **Paths** (`paths.jl`): `Circle`, `Polygon`, `Segment`, in 2D (`P2`) or 3D (`P3`), each giving `position(p, u)`,
@@ -136,7 +144,7 @@ Complex EP2s form curves in 3D (Re D = 0 ∩ Im D = 0). `track_ep_line(A, P₀, 
 
 ## Typical workflow (see `notebooks/ep_lines.jl`)
 
-1. Build the family (`AffineLiouvillian` of the model in a symmetry sector).
+1. Build the family (`AffineLiouvillian` of the model in a symmetry sector, or `FDLiouvillian` if not affine).
 2. Scan a two-parameter slice (`slice`, `tracked_scan`) from one diagonalisation.
 3. Localise its EPs (`localise_eps`).
 4. Continue them in the third parameter (`track_ep_lines`), check with dense diagonalisation and a convergence test.
@@ -146,6 +154,6 @@ Complex EP2s form curves in 3D (Re D = 0 ∩ Im D = 0). `track_ep_line(A, P₀, 
 - `test/runtests.jl`: the checks, each algorithm against closed forms (mock, boson dimer, Jaynes–Cummings).
 - `notebooks/`: cell scripts (`#%%`) using the package. `ep_lines.jl` (EP lines, the workflow above),
   `integrators.jl` (integration strategies and scaling), `mock_liouvillian.jl` (scans of the mock, robustness),
-  `qrm.jl` (Jaynes–Cummings tower), `linear_bosons.jl`, `nonlinear.jl` (optomechanics).
+  `qrm.jl` (Jaynes–Cummings tower), `redfield.jl` (Redfield: assembly, spectra, smoothness), `linear_bosons.jl`, `nonlinear.jl` (optomechanics).
 - `notes/monodromy_tracking.typ`: method, validation, limitations and future work.
 - `functions_QRM.jl` (repository root): the coworker's discriminant-based EP search, separate from the package.

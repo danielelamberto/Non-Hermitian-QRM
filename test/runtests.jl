@@ -1,8 +1,9 @@
 # Checks of the package against exactly known cases: the mock Liouvillian (closed-form spectrum, planted singularities)
-# and the Lindblad boson dimer (modes from the characteristic polynomial disc). About a minute on one thread.
+# and the Lindblad boson dimer (modes from the characteristic polynomial disc), and our Redfield assembly against
+# QuantumToolbox's, with the finite-difference family built on it. About a minute and a half on one thread.
 using Test
 using NonHermitianQRM
-using NonHermitianQRM: Circle, SVector
+using NonHermitianQRM: Circle, SVector, ohmic, temperature
 using QuantumToolbox, LinearAlgebra, SparseArrays, Accessors
 
 mock = MockLiouvillian()
@@ -370,6 +371,94 @@ end
             k = findfirst(c -> c.rect[1] ≤ g ≤ c.rect[2] && c.rect[3] ≤ ωb ≤ c.rect[4], leaves)
             @test k !== nothing && length(leaves[k].swaps) == (n ∈ (1, Nc - 1) ? 3 : 4) && isempty(leaves[k].windings)
         end
+    end
+
+    @testset "Bloch–Redfield: own assembly = QuantumToolbox's bloch_redfield_tensor" begin
+        br_tensor(Ĥ, bths, c_ops=nothing) = bloch_redfield_tensor(Ĥ, bths, c_ops; sec_cutoff=-1, fock_basis=Val(true))
+        same(L, R) = L.dimensions == R.dimensions && norm(L.data - R.data) < 1e-13*norm(R.data)
+        # QRM, both baths at finite temperature, parity broken by ε
+        Nc = 6
+        â, σ̂ = qrm_operators(Nc)
+        q = QRM(ωa=1.0, ωb=0.9, g=0.3, γa=0.05, γb=0.02, Ta=0.05, Tb=0.03, ε=0.07)
+        L = Redfield(â, σ̂, q)
+        @test same(L, br_tensor(Hamiltonian(â, σ̂, q), [(â + â', ohmic(q.γa/q.ωa, q.Ta)), (σ̂ + σ̂', ohmic(q.γb/q.ωb, q.Tb))]))
+        # the pattern depends on neither H nor the spectra (here g = 0, zero rate, T = 0)
+        L2 = Redfield(â, σ̂, QRM(ωa=1.0, ωb=1.2, g=0.0, γa=0.0, γb=0.02))
+        @test L2.data.colptr == L.data.colptr && rowvals(L2.data) == rowvals(L.data)
+        # the precomputed linear map: the same L, in the odd sector and in full, on the same pattern, at two points
+        odd = sort(reduce(vcat, excitation_sector(Nc, k) for k ∈ -Nc:Nc if isodd(k)))
+        for idx ∈ (odd, nothing)
+            R = RedfieldMap(first.(redfield_baths(â, σ̂, q)); idx)
+            for p ∈ (q, QRM(ωa=1.1, ωb=0.7, g=0.05, γa=0.1, γb=0.0, Ta=0.02, Tb=0.01))
+                L_map, L_ref = R(Hamiltonian(â, σ̂, p), redfield_baths(â, σ̂, p)), Redfield(â, σ̂, p).data
+                L_ref = idx === nothing ? L_ref : L_ref[idx, idx]
+                @test L_map.colptr == L_ref.colptr && rowvals(L_map) == rowvals(L_ref)
+                @test norm(L_map - L_ref) < 1e-14*norm(L_ref)
+            end
+        end
+        R = RedfieldMap(first.(redfield_baths(â, σ̂, q)); idx=odd)
+        @test_throws ArgumentError R(Hamiltonian(â, σ̂, q), reverse(redfield_baths(â, σ̂, q)))     # baths swapped
+        # boson dimer at T = 0
+        n = 4
+        â, b̂ = destroy(n) ⊗ eye(n), eye(n) ⊗ destroy(n)
+        d = BosonDimer(ωa=1.0, ωb=1.1, γa=0.1, γb=0.05, g=0.2, approx=[])
+        @test same(Redfield(â, b̂, d), br_tensor(Hamiltonian(â, b̂, d), [(â + â', ohmic(2d.γa/d.ωa, 0.0)), (b̂ + b̂', ohmic(2d.γb/d.ωb, 0.0))]))
+        # optomechanics: Redfield mechanics, Lindblad cavity (c_ops)
+        o = Optomech(ωb=1.0, γa=0.1, γb=0.05, g=0.1, Δ=-1.0, F=0.2, nBa=0.1, nBb=0.2, approx=[])
+        c_ops = [√(2o.γa*(1 + o.nBa))*â, √(2o.γa*o.nBa)*â']
+        @test same(Redfield(â, b̂, o), br_tensor(Hamiltonian(â, b̂, o), [(b̂ + b̂', ohmic(2o.γb/o.ωb, temperature(o.nBb, o.ωb)))], c_ops))
+    end
+
+    @testset "finite-difference family (Redfield QRM, odd sector)" begin
+        Nc = 5
+        â, σ̂ = qrm_operators(Nc)
+        odd = sort(reduce(vcat, excitation_sector(Nc, k) for k ∈ -Nc:Nc if isodd(k)))
+        q = QRM(ωa=1.0, ωb=1.0, γa=0.1, γb=0.0, Ta=0.02, Tb=0.02)
+        # along the rates alone (H fixed), Redfield is affine: the finite differences are exact up to round-off
+        L_rates(prm_P) = Redfield(â, σ̂, setproperties(q, (g=0.3, γa=prm_P[1], γb=prm_P[2]))).data[odd, odd]
+        F, A = FDLiouvillian(L_rates, P2(0.1, 0.02)), AffineLiouvillian(L_rates, 2; h=0.05)
+        prm_P, v = P2(0.07, 0.03), P2(0.3, -1.2)
+        @test norm(F(prm_P) - A(prm_P)) < 1e-14*norm(A(prm_P))
+        @test norm(derivative(F, prm_P, v) - derivative(A, v)) < 1e-10*norm(derivative(A, v))
+        # along (g, ωb): central differences, error ∝ h² (h = 1e-3, far above the round-off)
+        L_gω(prm_P) = Redfield(â, σ̂, setproperties(q, (g=prm_P[1], ωb=prm_P[2]))).data[odd, odd]
+        prm_P, v = P2(0.3, 0.9), P2(1.0, 0.5)
+        dL(h) = derivative(FDLiouvillian(L_gω, prm_P; h, check=false), prm_P, v)
+        @test 3.9 < norm(dL(2e-3) - dL(1e-3))/norm(dL(1e-3) - dL(5e-4)) < 4.1
+        # the check of h: the default passes, a step too large fails by truncation, one too small by round-off
+        @test FDLiouvillian(L_gω, prm_P; check_at=P2(0.025, 1.0)) isa FDLiouvillian
+        @test_throws r"truncation" FDLiouvillian(L_gω, prm_P; h=0.05)
+        @test_throws r"round-off" FDLiouvillian(L_gω, prm_P; h=1e-12)
+        # slice: the generic restriction to a plane (Reparametrised) runs on it
+        A = FDLiouvillian(L_gω, P2(0.025, 1.0))
+        e1, e2 = P2(0.6, 0.8), P2(-0.8, 0.6)
+        S = slice(A, prm_P, e1, e2)
+        @test norm(S(P2(0.01, -0.02)) - A(prm_P + 0.01*e1 - 0.02*e2)) == 0
+        @test norm(derivative!(work_matrix(S), S, P2(0.01, -0.02), P2(1.0, 0.0)) - derivative(A, prm_P + 0.01*e1 - 0.02*e2, e1)) < 1e-12
+        # tracking: the pair near the JC EP₁ (g = γa/4 = 0.025, ωb = ωa) swaps around its Redfield counterpart, not
+        # beside it, and the tracked eigenvalues are exact eigenvalues at the end of the loop
+        for (centre, swapped) ∈ ((P2(0.025, 1.0), true), (P2(0.06, 1.0), false))
+            loop = Circle(centre, 0.01)
+            pair = pair_near(A(position(loop, 0.0)), -0.025 - 1.0im)
+            ends = [track(A, loop, λ0, r0)[1].u[end][end] for (λ0, r0) ∈ pair]
+            @test (argmin(abs.(first.(pair) .- ends[1])) == 2) == swapped
+            λ_dense = eigvals(Matrix(A(position(loop, 1.0))))
+            @test maximum(minimum(abs.(λ_dense .- λ)) for λ ∈ ends) < 1e-10
+        end
+        # an EP line of the full QRM with Lindblad baths (affine), in (δω, δγ, g) as in ep_lines.jl: the finite-
+        # difference family on the same builder follows it step for step (dL differs by round-off only). Seed: EP_1
+        # of a pair near the JC estimate δω = 0, δγ = 2g, by the corrector in the slice g = 0.008.
+        Nc = 6
+        â, σ̂ = qrm_operators(Nc)
+        odd = sort(reduce(vcat, excitation_sector(Nc, k) for k ∈ -Nc:Nc if isodd(k)))
+        qrm_at(prm_P) = setproperties(QRM(approx=[RWA_env]), (ωa=1 + prm_P[1], ωb=1 - prm_P[1], γa=0.05 + prm_P[2],
+                                                             γb=0.05 - prm_P[2], g=prm_P[3]))
+        L_lind(prm_P) = liouvillian(Lindbladian(â, σ̂, qrm_at(prm_P))...).data[odd, odd]
+        A_aff, A_fd = AffineLiouvillian(L_lind, 3; h=0.01), FDLiouvillian(L_lind, P3(0, 0.016, 0.008))
+        seed = ep_correct(A_aff, P3(0, 0.016, 0.008), P3(0, 0, 1), -0.025 - 1.0im; w=0.002)
+        l_aff, l_fd = [track_ep_line(A, seed.P, seed.λ; h=0.002, hmax=0.002, nsteps=6) for A ∈ (A_aff, A_fd)]
+        @test length(l_fd.points) == length(l_aff.points) ≥ 5
+        @test maximum(norm.(l_fd.points .- l_aff.points)) < 1e-12 && maximum(abs.(l_fd.λs .- l_aff.λs)) < 1e-10
     end
 
 end

@@ -7,7 +7,8 @@ Tools to find exceptional points (EPs) of Liouvillians.
   Jaynes–Cummings limit (`qrm.jl`).
 - Monodromy: eigenpairs followed continuously around loops in a two-parameter plane swap when the loop encloses an EP.
   Paths in 2D or 3D (`paths.jl`), Liouvillians affine in the parameters, their restriction to planes and
-  reparametrisations (`affine.jl`), predictor–corrector tracking of one eigenpair (`tracking.jl`), localisation of one
+  reparametrisations (`affine.jl`), smooth non-affine ones differentiated by finite differences
+  (`finite_differences.jl`), predictor–corrector tracking of one eigenpair (`tracking.jl`), localisation of one
   EP by bisection or greedy bracketing (`bisection.jl`), a systematic scan of a grid (`scan.jl`), the localisation of
   the EPs it finds (`localise.jl`), and the continuation of a line of EPs through a three-parameter space
   (`epline.jl`). Method and validation: notes/monodromy_tracking.typ.
@@ -34,6 +35,7 @@ include("mock.jl")
 include("qrm.jl")
 include("paths.jl")
 include("affine.jl")
+include("finite_differences.jl")
 include("tracking.jl")
 include("bisection.jl")
 include("scan.jl")
@@ -44,16 +46,18 @@ include("localise.jl")
 export Model, Approximation, RWA_env, RWA_coupling, N_conserving, linearised, Boson, BosonDimer, Duffing, Optomech,
        classical_steady_state, classical_displacement, linearised_dimer, linearised_EP, D_R, disc, EP, roots_sorted
 # master_equations.jl
-export Hamiltonian, Lindbladian, DressedLiouvillian, Redfield, modes, dressed_modes, parity_sector, min_gap,
-       dominant_mode
+export Hamiltonian, Lindbladian, DressedLiouvillian, Redfield, redfield_liouvillian, redfield_pattern, RedfieldMap,
+       modes, dressed_modes, parity_sector, min_gap, dominant_mode
 # mock.jl
 export MockBlock, DimerBlock, DrivenQubit, DetunedQubit, MockLiouvillian, default_mock_blocks, block_spectrum,
        mock_sector, mock_matrix, mock_spectrum, mock_singularities
 # qrm.jl
-export QRM, qrm_operators, excitation_sector, jc_effective_energies, jc_spectrum, jc_EP
+export QRM, qrm_operators, redfield_baths, excitation_sector, jc_effective_energies, jc_spectrum, jc_EP
 # paths.jl, affine.jl
 export P2, P3, ParamPath, plane_basis, Circle, Polygon, Segment, velocity, breakpoints, AffineLiouvillian, work_matrix,
        evaluate!, derivative, derivative!, slice, Reparametrised
+# finite_differences.jl
+export FDLiouvillian
 # tracking.jl
 export Eigenpair, eigenpairs_near, pair_near, normalisation, StaleLU, tangent, correct!, track, tracking_succeeded,
        Tsit5, Vern7

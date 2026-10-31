@@ -51,8 +51,9 @@ temperature(mdl::Boson) = temperature(mdl.nB, mdl.ω0)
 temperature(mdl::Duffing) = temperature(mdl.nB, mdl.ω0)
 temperature(mdl::BosonDimer) = temperature(mdl.nB, mdl.ωa)
 
-# Ohmic spectrum S(ω) = κω(1 + n(ω)) at temperature T (ω > 0 emission, ω < 0 absorption).
-ohmic(κ, T) = ω -> T == 0 ? (ω > 0 ? κ*ω : zero(ω)) : (ω == 0 ? κ*T : κ*ω/(1 - exp(-ω/T)))
+# Ohmic spectrum S(ω) = κω(1 + n(ω)) at temperature T (ω > 0 emission, ω < 0 absorption). expm1: accurate for |ω| ≪ T
+# (nearly degenerate levels), where 1 - exp(-ω/T) loses all digits.
+ohmic(κ, T) = ω -> T == 0 ? (ω > 0 ? κ*ω : zero(ω)) : (ω == 0 ? κ*T : -κ*ω/expm1(-ω/T))
 
 # Optomechanics: the cavity a always gets Lindblad jump operators (see Optomech).
 function _cavity_jumps(â, mdl::Optomech)
@@ -91,18 +92,167 @@ end
     Redfield(â, b̂, mdl::BosonDimer)
     Redfield(â, b̂, mdl::Optomech)
 
-Non-secular Bloch–Redfield tensor (`sec_cutoff = -1`) with Ohmic spectra, κ = 2γ/ω0, in the Fock basis. It keeps the
-terms pairing ω and -ω transitions: velocity damping, as in `D_R` without `RWA_env`. No Lamb shift (none is needed for
-a strictly Ohmic bath). For `Optomech`, only the mechanics b is treated this way, in the eigenbasis of the full
-rotating-frame H, with the cavity's Lindblad terms passed as collapse operators.
+Non-secular Bloch–Redfield Liouvillian (`redfield_liouvillian`) with Ohmic spectra, κ = 2γ/ω0, in the Fock basis. It
+keeps the terms pairing ω and -ω transitions: velocity damping, as in `D_R` without `RWA_env`. No Lamb shift (none is
+needed for a strictly Ohmic bath). For `Optomech`, only the mechanics b is treated this way, in the eigenbasis of the
+full rotating-frame H, with the cavity's Lindblad terms passed as collapse operators.
 """
 Redfield(â::QuantumObject, mdl::Boson) = _redfield(Hamiltonian(â, mdl), baths(â, mdl), temperature(mdl))
 Redfield(â::QuantumObject, mdl::Duffing) = _redfield(Hamiltonian(â, mdl), baths(â, mdl), temperature(mdl))
 Redfield(â::QuantumObject, b̂::QuantumObject, mdl::BosonDimer) = _redfield(Hamiltonian(â, b̂, mdl), baths(â, b̂, mdl), temperature(mdl))
-Redfield(â::QuantumObject, b̂::QuantumObject, mdl::Optomech) = bloch_redfield_tensor(
-    Hamiltonian(â, b̂, mdl), [(b̂ + b̂', ohmic(2mdl.γb/mdl.ωb, temperature(mdl.nBb, mdl.ωb)))], _cavity_jumps(â, mdl);
-    sec_cutoff=-1, fock_basis=Val(true))
-_redfield(Ĥ, bths, T) = bloch_redfield_tensor(Ĥ, [(â + â', ohmic(2γ/ω, T)) for (â, γ, ω) ∈ bths]; sec_cutoff=-1, fock_basis=Val(true))
+Redfield(â::QuantumObject, b̂::QuantumObject, mdl::Optomech) = redfield_liouvillian(
+    Hamiltonian(â, b̂, mdl), [(b̂ + b̂', ohmic(2mdl.γb/mdl.ωb, temperature(mdl.nBb, mdl.ωb)))], _cavity_jumps(â, mdl))
+_redfield(Ĥ, bths, T) = redfield_liouvillian(Ĥ, [(â + â', ohmic(2γ/ω, T)) for (â, γ, ω) ∈ bths])
+
+"""
+    redfield_liouvillian(Ĥ, baths, c_ops=nothing)
+
+Non-secular Bloch–Redfield Liouvillian in the basis of `Ĥ` (e.g. Fock), as a SuperOperator: QuantumToolbox's
+`bloch_redfield_tensor(Ĥ, baths, c_ops; sec_cutoff=-1, fock_basis=Val(true))`, assembled here. `baths` lists pairs
+(X̂, S) of a Hermitian coupling operator and its bath spectrum S(ω) (ω > 0 emission); `c_ops` adds Lindblad terms.
+With H = Σᵢ Eᵢ |i⟩⟨i|, each bath enters through Λ = Σᵢⱼ S(Eᵢ - Eⱼ) |i⟩⟨i|X|j⟩⟨j| and adds
+    ρ ↦ (Λ†ρX + XρΛ - ρΛX - XΛ†ρ)/2.
+Λ is a function of H alone, independent of the phases and the order of its eigenvectors, and smooth in H wherever S
+is (T > 0 for `ohmic`): so is L.
+
+L is stored on `redfield_pattern`, fixed by the patterns of the X̂ and `c_ops` and independent of H and S, with no
+small entry dropped (unlike QuantumToolbox's tidyup): every L of a family built this way has the same pattern. Λ is
+dense, so each bath gives up to 2N³ + 2N² nnz(X) entries for an N-dimensional H (nnz(X)² for a Lindblad jump X).
+"""
+function redfield_liouvillian(Ĥ::QuantumObject, baths, c_ops=nothing)
+    Xs = [X̂.data for (X̂, _) ∈ baths]
+    L = redfield_assemble(Ĥ.data, Xs, filtered_operators(Ĥ.data, [(X, S) for (X, (_, S)) ∈ zip(Xs, baths)]))
+    isnothing(c_ops) || (L += sparse(liouvillian(nothing, c_ops).data))
+    pattern = redfield_pattern(size(Ĥ, 1), [X̂ for (X̂, _) ∈ baths], c_ops)
+    L_H = liouvillian(Ĥ)                                     # for the type and dimensions of a SuperOperator
+    return QuantumObject(on_pattern(L, pattern), L_H.type, L_H.dimensions)
+end
+
+"""
+    filtered_operators(H, baths)
+
+The physics of `redfield_liouvillian`: for each bath (X, S), the filtered operator Λ = Σᵢⱼ S(Eᵢ - Eⱼ)|i⟩⟨i|X|j⟩⟨j|
+over the eigenpairs (Eᵢ, |i⟩) of the Hermitian matrix H, as a dense matrix in the basis of H.
+"""
+function filtered_operators(H::AbstractMatrix, baths)
+    E, U = eigen(Hermitian(Matrix(H)))
+    return [U*((U'*X*U) .* S.(E .- E'))*U' for (X, S) ∈ baths]
+end
+
+"""
+    redfield_assemble(H, Xs, Λs)
+
+The assembly of `redfield_liouvillian`, as a sparse matrix on no fixed pattern: -i[H, ρ] + Σ (Λ†ρX + XρΛ - ρΛX -
+XΛ†ρ)/2 over the coupling operators `Xs` and their filtered operators `Λs`, vectorised column-major (QuantumToolbox's
+spre(A) = I ⊗ A, spost(B) = Bᵀ ⊗ I). Linear in H and Λ, and in conj(Λ) through Λ†; H need not be Hermitian (the
+unit inputs of `RedfieldMap`).
+"""
+function redfield_assemble(H, Xs, Λs)
+    N = size(H, 1)
+    Id = sparse(one(ComplexF64)*I, N, N)
+    Hs = sparse(H)
+    L = -im*(kron(Id, Hs) - kron(transpose(Hs), Id))
+    for (X, Λ) ∈ zip(Xs, Λs)
+        X, Λ = sparse(X), sparse(Λ)
+        L += (kron(transpose(X), Λ') + kron(transpose(Λ), X) - kron(transpose(Λ*X), Id) - kron(Id, X*Λ'))/2
+    end
+    return L
+end
+
+"""
+    redfield_pattern(N, X̂s, c_ops=nothing)
+
+Sparsity pattern of `redfield_liouvillian` for an N-dimensional H, coupling operators `X̂s` and Lindblad `c_ops`: the
+union of the patterns of spre and spost of a dense operator (the Hamiltonian part, ΛX and XΛ†, c†c), of sprepost(Λ†, X)
+and sprepost(X, Λ) with Λ dense, and of sprepost(c, c†). All values are 1.
+"""
+function redfield_pattern(N, X̂s, c_ops=nothing)
+    ones_on(M) = (S = sparse(M); SparseMatrixCSC(size(S)..., S.colptr, S.rowval, ones(nnz(S))))
+    J, Id = sparse(ones(N, N)), sparse(1.0I, N, N)
+    terms = [kron(Id, J), kron(J, Id)]
+    for X̂ ∈ X̂s
+        X = ones_on(X̂.data)
+        push!(terms, kron(sparse(transpose(X)), J), kron(J, X))
+    end
+    for ĉ ∈ something(c_ops, [])
+        c = ones_on(ĉ.data)
+        push!(terms, kron(c, c))                     # pattern of sprepost(c, c†) = kron(conj(c), c)
+    end
+    P = reduce(+, terms)                             # entries ≥ 1: no cancellation
+    return SparseMatrixCSC(size(P)..., P.colptr, P.rowval, ones(nnz(P)))
+end
+
+"""
+    RedfieldMap(X̂s; idx=nothing)
+    (R::RedfieldMap)(H, spectra)
+
+The Redfield Liouvillian of a family with fixed coupling operators `X̂s` (one per bath), as a precomputed linear map:
+the assembly (`redfield_assemble`) is linear in H and in each Λ, and in conj(Λ) (through Λ†), so the stored values
+of L, restricted to the indices `idx` of the vectorised ρ (all if `nothing`) and placed on `R.pattern`, are
+    values(L) = M x,   x = [vec H; vec Λ₁; vec conj(Λ₁); vec Λ₂; …],
+with M a sparse matrix built once. `R(H, spectra)`, with H the Hamiltonian as a matrix and `spectra` the bath
+spectra S(ω) in the order of `X̂s`, computes the Λ (`filtered_operators`) and returns M x as a sparse matrix on
+`R.pattern` (sharing its index arrays): `redfield_liouvillian(Ĥ, baths).data[idx, idx]` without its sparse
+assembly. `R(Ĥ, baths)` takes the arguments of `redfield_liouvillian` instead (the X̂ of `baths` must be `X̂s`). No
+Lindblad `c_ops`.
+
+M is built from the assembly itself, on unit inputs: for E with a single 1 at (i, j), the output of the input E is
+a e + b e and that of iE is i(a e - b e), with a, b the columns of the linear and conjugate-linear parts, so
+a e = (L(E) - i L(iE))/2 and b e = (L(E) + i L(iE))/2. For H, b must vanish (checked, exactly). 2(1 + nbaths)N²
+assemblies of unit inputs, once.
+"""
+struct RedfieldMap{TX}
+    Xs::Vector{TX}                           # coupling operators (sparse matrices)
+    pattern::SparseMatrixCSC{Float64,Int}    # pattern of L restricted to idx (values 1)
+    idx::Vector{Int}
+    M::SparseMatrixCSC{ComplexF64,Int}       # nnz(pattern) × (1 + 2 nbaths)N²
+end
+function RedfieldMap(X̂s; idx=nothing)
+    Xs = [sparse(ComplexF64.(X̂.data)) for X̂ ∈ X̂s]
+    N = size(first(Xs), 1)
+    idx = collect(something(idx, 1:N^2))
+    pattern = redfield_pattern(N, X̂s)[idx, idx]
+    zero_ops = [spzeros(ComplexF64, N, N) for _ ∈ Xs]
+    # stored values of an assembled L in the sector, on its pattern
+    values_of(L) = nonzeros(on_pattern(L[idx, idx], pattern))
+    rows, cols, vals = Int[], Int[], ComplexF64[]
+    function add_column!(col, v)
+        for k ∈ findall(!iszero, v)
+            push!(rows, k); push!(cols, col); push!(vals, v[k])
+        end
+    end
+    for input ∈ 0:length(Xs)                                       # input 0: H; input b: Λ of bath b
+        for (k, (i, j)) ∈ enumerate((i, j) for j ∈ 1:N for i ∈ 1:N)  # column-major: vec index k = i + N(j - 1)
+            assemble(c) = (E = sparse([i], [j], [c], N, N);
+                           input == 0 ? redfield_assemble(E, Xs, zero_ops) :
+                                        redfield_assemble(spzeros(ComplexF64, N, N), Xs,
+                                                          [b == input ? E : Z for (b, Z) ∈ enumerate(zero_ops)]))
+            L1, Li = values_of(assemble(1.0 + 0im)), values_of(assemble(1.0im))
+            a, b = (L1 .- im .* Li) ./ 2, (L1 .+ im .* Li) ./ 2
+            if input == 0
+                all(iszero, b) || error("the assembly is not complex-linear in H")
+                add_column!(k, a)
+            else
+                offset = N^2*(1 + 2(input - 1))
+                add_column!(offset + k, a)
+                add_column!(offset + N^2 + k, b)
+            end
+        end
+    end
+    M = sparse(rows, cols, vals, nnz(pattern), N^2*(1 + 2length(Xs)))
+    return RedfieldMap(Xs, pattern, idx, M)
+end
+
+function (R::RedfieldMap)(Ĥ::QuantumObject, baths)
+    all(X̂.data == X for ((X̂, _), X) ∈ zip(baths, R.Xs)) && length(baths) == length(R.Xs) ||
+        throw(ArgumentError("the coupling operators of `baths` are not those of the RedfieldMap"))
+    return R(Ĥ.data, [S for (_, S) ∈ baths])
+end
+function (R::RedfieldMap)(H::AbstractMatrix, spectra)
+    Λs = filtered_operators(H, collect(zip(R.Xs, spectra)))
+    x = vcat(vec(Matrix(H)), (vcat(vec(Λ), vec(conj(Λ))) for Λ ∈ Λs)...)
+    return SparseMatrixCSC(size(R.pattern)..., R.pattern.colptr, R.pattern.rowval, R.M*x)
+end
 
 """
     DressedLiouvillian(â, mdl::Boson; N_trunc=nothing, σ_filter=Inf)

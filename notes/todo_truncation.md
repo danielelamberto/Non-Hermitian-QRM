@@ -110,11 +110,45 @@ Setup: Redfield QRM, ωa = ωb = 1, γb = 0.05, Ta = Tb = 0.02, odd sector. Posi
   between 1e-7 and 2e-6. That includes g ≈ 0.332, which has maxlevel 17, so their maxlevel ≤ 15 filter is
   conservative.
 - The γa ≈ 0.006 and 0.0097 families lie below their γa window (≥ 0.01); they are not in their table.
-- Pending when this note was written: groups found at Nc = 12 near g ≈ 0.113, 0.290, 0.296, 0.307 and 0.359 had no EP
-  in their ±4e-3 box at Nc = 16/20. A rescan in wider boxes (±3e-3 in γa, ±0.015 in g) was running to tell "moved"
-  from "vanished".
+- Groups found at Nc = 12 near g ≈ 0.113, 0.290, 0.296, 0.307 and 0.359 had no EP in their ±4e-3 box at Nc = 16/20.
+  Rescan in wider boxes (±3e-3 in γa, ±0.015 in g), complete at Nc = 16, stopped during Nc = 20:
+  - g ≈ 0.113: no EP at Nc = 16 or 20. An artefact of Nc = 12.
+  - g ≈ 0.290: it is the γa ≈ 0.0198 family, at (0.01978, 0.29475) and (0.01981, 0.29476), λ ≈ −0.1946 − 1.0023i
+    (Nc = 16). That is the coworker's g ≈ 0.2948 pair (maxlevel 20). Nc = 20 moves it by another 1e-5 to 3e-5.
+  - g ≈ 0.342: both partners found, at (0.009814, 0.345857) and (0.009882, 0.345892), λ ≈ −0.0811 − 1.0117i.
+  - g ≈ 0.296, 0.307 and 0.359 (Nc = 16 only, not confirmed at 20): 9 distinct split pairs in γa ∈ [0.0035, 0.0099],
+    g ∈ [0.288, 0.364]:
+    - γa ≈ 0.0098–0.0099: g ≈ 0.2877 and 0.3039;
+    - γa ≈ 0.0064–0.0065: g ≈ 0.2970, 0.3152 and 0.3642;
+    - γa ≈ 0.0046–0.0048: g ≈ 0.3085 and 0.3564;
+    - γa ≈ 0.0035–0.0037: g ≈ 0.2983, 0.3238 and 0.3507.
+
+    So below g ≈ 0.37 the γa ≈ 0.006 and 0.0097 families are denser than the Nc = 12 scan showed, and further
+    families appear at γa ≈ 0.0035 and 0.0047, partly below the scan's γa = 0.005: a tower structure like the
+    coworker's γa ≈ 0.0198 column. Needs a scan at Nc ≥ 16 down to γa ≈ 0.003.
 - The γa ≈ 0.026 pair of the Nc = 12 scan (λ ≈ −0.31 − 1.20i) is a truncation artefact: 30% of its weight sits on the
   top Fock levels. Drop it.
+
+## Full scan at Nc = 16 (2026-10-30)
+
+The last cell of `notebooks/redfield.jl`, run on a grid of γa ∈ [0.005, 0.04] (36 points) × g ∈ [0.1, 0.5] (41 points),
+with 42 eigenvalues tracked. The scan took 2.1 h and the localisation 1.3 h. It found 58 EP2s, 0 DPs and 0 unresolved
+cells; 799 cells have lost labels (window, g ≳ 0.22). Table: `data/redfield_scan_gammaa_g_Nc16.jld2`. Figure:
+`figures/redfield_scan_gammaa_g.png`.
+- γa ≈ 0.0198 column, g ≥ 0.29: all 14 EPs match the coworker to 2e-7 – 3e-5 in position. At g ≈ 0.265 and 0.280
+  (their maxlevel 21–23), the agreement is only 3e-4 – 3e-3.
+- The γa ≈ 0.006 and 0.0097 families match the Nc = 20 reference table above and contain the wider-box pairs at
+  g ≈ 0.288–0.364.
+- New, below g ≈ 0.29, and not checked at a larger Nc: split pairs at g ≈ 0.236–0.241 (γa ≈ 0.0064, 0.0094, 0.0173),
+  and at g ≈ 0.271 and 0.278.
+- Probably spurious:
+  - (0.0193, 0.264) and (0.0193, 0.260), λ ≈ −0.31 − 1.19i: the Nc = 12 γa ≈ 0.026 artefact, moved with Nc. The two
+    points are 4e-3 apart and no coworker EP is nearby.
+  - (0.034, 0.392), λ ≈ −0.74 − 1.59i: an isolated EP.
+- (0.00502, 0.479) sits on the window edge without a partner; the partner is probably just below γa = 0.005.
+
+Localisation of the g < 0.29 pairs and of the suspects is deferred until the dressed truncation and the exact derivative
+are in place (step 3 and `notes/todo_daleckii_krein.md`).
 
 ## Lessons from the Fock-basis scans
 
